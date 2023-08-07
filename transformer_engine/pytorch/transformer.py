@@ -419,6 +419,10 @@ class TransformerLayer(torch.nn.Module):
         cp_group: Union[dist_group_type, None],
         cp_global_ranks: Union[int],
         cp_stream: torch.cuda.Stream,
+        cp_split_dim: str = "sequence",
+        cp_lossless_out: bool = False,
+        cp_lossless_lse: bool = False,
+        cp_lossless_dqkv: bool = False,
     ) -> None:
         """Set CP group and CP dual-stream running"""
         # Deep iterate but skip self to avoid infinite recursion.
@@ -426,7 +430,10 @@ class TransformerLayer(torch.nn.Module):
             if index == 0:
                 continue
             if hasattr(child, "set_context_parallel_running"):
-                child.set_context_parallel_running(cp_group, cp_global_ranks, cp_stream)
+                child.set_context_parallel_running(cp_group, cp_global_ranks,
+                                                   cp_stream, cp_split_dim,
+                                                   cp_lossless_out, cp_lossless_lse,
+                                                   cp_lossless_dqkv)
 
     def forward(
         self,

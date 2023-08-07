@@ -118,7 +118,7 @@ def flash_attn_fwd_softmax_lse_correction(softmax_lse, softmax_lse_per_step):
     softmax_lse.log_()
 
 
-class FlashAttnUnpaddedFuncWithCP(torch.autograd.Function):
+class FlashAttnUnpaddedFuncWithCPSplitSeq(torch.autograd.Function):
 
     @staticmethod
     def forward(ctx, q, k, v, cu_seqlens_q, cu_seqlens_k, max_seqlen_q, max_seqlen_k, dropout_p,
@@ -426,16 +426,406 @@ class FlashAttnUnpaddedFuncWithCP(torch.autograd.Function):
         dkv = dkv.view(*kv.shape[0:2], -1, *kv.shape[-2:])
         return dq, dkv[0], dkv[1], None, None, None, None, None, None, None, None, None, None, None
 
+def flash_attn_ag_communication(x, cp_group):
+    cp_size = get_distributed_world_size(cp_group)
+
+    x = x.view(x.shape[0], 2, x.shape[1]//2, *x.shape[2:])
+    x_ag = [torch.empty_like(x) for _ in range(cp_size)]
+    torch.distributed.all_gather(x_ag, x, cp_group)
+
+    x_ = [None] * (2*cp_size)
+    for idx, x in enumerate(x_ag):
+        x_[idx] = x[:, 0, ...]
+        x_[2*cp_size-idx-1] = x[:, 1, ...]
+
+    x = torch.cat(x_, dim=1)
+    return x_ag, x.view(-1, *x.shape[-2:])
+
+
+class FlashAttnUnpaddedFuncWithCPSplitSeq_v0(torch.autograd.Function):
+
+    @staticmethod
+    def forward(ctx, q, k, v, cu_seqlens_q, cu_seqlens_k, max_seqlen_q, max_seqlen_k, dropout_p,
+                cp_group, cp_global_ranks, cp_stream, softmax_scale, causal, deterministic,
+                cp_lossless_out, cp_lossless_lse, cp_lossless_dqkv):
+        if softmax_scale is None:
+            softmax_scale = q.shape[-1] ** (-0.5)
+
+        cp_size = get_distributed_world_size(cp_group)
+        rank = get_distributed_rank(cp_group)
+        batch_size = q.shape[0]
+
+        # [b, s, h, d]
+        out = torch.empty_like(q).zero_()
+        # [b, 2, s//2, h, d]
+        out = out.view(out.shape[0], 2, out.shape[1]//2, *out.shape[2:])
+        # list [cp_size, b, 2, s//2, h, d], [b*s*cp_size, h, d]
+        q_ag, q = flash_attn_ag_communication(q, cp_group)
+        k_ag, k = flash_attn_ag_communication(k, cp_group)
+        v_ag, v = flash_attn_ag_communication(v, cp_group)
+
+        if cp_lossless_out or cp_lossless_lse:
+            out_no_loss, softmax_lse_no_loss, rng_state, _ = _flash_attn_forward(
+                q, k, v, torch.empty_like(q), cu_seqlens_q*cp_size, cu_seqlens_k*cp_size,
+                max_seqlen_q*cp_size, max_seqlen_k*cp_size, dropout_p, softmax_scale,
+                causal, return_softmax=False)
+
+        if cp_lossless_out:
+            # [b, 2*cp_size, s//2, h, d]
+            out_no_loss_ = out_no_loss.view(batch_size, 2*cp_size, out_no_loss.shape[0]//(batch_size*2*cp_size), *out_no_loss.shape[1:])
+            # [b, s, h, d]
+            out_no_loss_ = torch.cat([out_no_loss_[:, rank, ...], out_no_loss_[:, (2*cp_size-rank-1), ...]], dim=1)
+        if cp_lossless_lse:
+            # [b, h, 2*cp_size, s//2]
+            softmax_lse_no_loss_ = softmax_lse_no_loss.view(*softmax_lse_no_loss.shape[:-1], 2*cp_size, softmax_lse_no_loss.shape[-1]//(2*cp_size))
+            softmax_lse_no_loss_idx = torch.tensor([rank, 2*cp_size-rank-1], device=softmax_lse_no_loss_.device)
+            # [b, h, 2, s//2]
+            softmax_lse_no_loss_ = softmax_lse_no_loss_.index_select(-2, softmax_lse_no_loss_idx)
+
+        out_per_step = [None for _ in range(cp_size)]
+        softmax_lse_per_step = [None for _ in range(cp_size)]
+
+        for i in range(cp_size):
+            if (cp_lossless_out and cp_lossless_lse and cp_lossless_dqkv): break;
+
+            idx = (rank - i) % cp_size
+            # [b, 2, s//2, h, d]
+            q_, k_, v_ = q_ag[rank], k_ag[idx], v_ag[idx]
+
+            if i == 0:
+                # [b*s, h, d]
+                q_, k_, v_ = [x.view(-1, *x.shape[-2:]) for x in [q_, k_, v_]]
+                out_per_step[i] = torch.empty_like(q_)
+                _, softmax_lse_per_step[i], rng_state, _ = _flash_attn_forward(
+                     q_, k_, v_, out_per_step[i], cu_seqlens_q, cu_seqlens_k, max_seqlen_q, max_seqlen_k,
+                     dropout_p, softmax_scale, causal=True, return_softmax=False)
+            elif i <= rank:
+                # [b*s, h, d]
+                q_ = q_.view(-1, *q_.shape[-2:])
+                out_per_step[i] = torch.empty_like(q_)
+                # [b*s//2, h, d]
+                k_, v_ = [x.contiguous().view(-1, *x.shape[-2:]) for x in [k_[:, 0, ...], v_[:, 0, ...]]]
+                _, softmax_lse_per_step[i], rng_state, _ = _flash_attn_forward(
+                     q_, k_, v_, out_per_step[i], cu_seqlens_q, cu_seqlens_k//2, max_seqlen_q, max_seqlen_k//2,
+                     dropout_p, softmax_scale, causal=False, return_softmax=False)
+            else:
+                # [b*s//2, h, d]
+                q_ = q_[:, 1, ...].contiguous().view(-1, *q_.shape[-2:])
+                out_per_step[i] = torch.empty_like(q_)
+                # [b*s, h, d]
+                k_, v_ = [x.view(-1, *x.shape[-2:]) for x in [k_, v_]]
+                _, softmax_lse_per_step[i], rng_state, _ = _flash_attn_forward(
+                     q_, k_, v_, out_per_step[i], cu_seqlens_q//2, cu_seqlens_k, max_seqlen_q//2, max_seqlen_k,
+                     dropout_p, softmax_scale, causal=False, return_softmax=False)
+
+            if not cp_lossless_lse:
+                if i == 0:
+                    # [b, h, s]
+                    softmax_lse = torch.clone(softmax_lse_per_step[i]).to(torch.double)
+                    # [b, h, 2, s//2]
+                    softmax_lse_ = softmax_lse.view(*softmax_lse.shape[:-1], 2, softmax_lse.shape[-1]//2)
+                elif i <= rank:
+                    flash_attn_fwd_softmax_lse_correction(softmax_lse, softmax_lse_per_step[i])
+                else:
+                    flash_attn_fwd_softmax_lse_correction(softmax_lse_[..., 1, :], softmax_lse_per_step[i])
+
+        if not cp_lossless_out:
+            # [b, h, s]
+            softmax_lse_corrected = softmax_lse_no_loss_.view(*softmax_lse_no_loss_.shape[:-2], -1) if cp_lossless_lse else softmax_lse.to(torch.float)
+            # [b, h, 2, s//2]
+            softmax_lse_corrected_ = softmax_lse_no_loss_ if cp_lossless_lse else softmax_lse_.to(torch.float)
+            for i in range(cp_size):
+                # [b, s, h, d] or [b, s//2, h, d]
+                out_ = out_per_step[i].view(batch_size, -1, *out.shape[-2:])
+                if i <= rank:
+                    flash_attn_fwd_out_correction(out.view(*out_.shape), out_, softmax_lse_corrected, softmax_lse_per_step[i])
+                else:
+                    flash_attn_fwd_out_correction(out[:, 1, ...], out_, softmax_lse_corrected_[..., 1, :], softmax_lse_per_step[i])
+            # [b, s, h, d]
+            out_ = out.view(out.shape[0], -1, *out.shape[-2:])
+            # [b*s*cp_size, h, d]
+            out_ = flash_attn_ag_communication(out_, cp_group)[1]
+
+        if not cp_lossless_lse:
+            # [b, s, h, 1]
+            softmax_lse_ = softmax_lse.to(torch.float).transpose(1, 2).contiguous().unsqueeze(-1)
+            # [b*s*cp_size, h]
+            softmax_lse_ = flash_attn_ag_communication(softmax_lse_, cp_group)[1].squeeze(-1)
+            # [b, h, s*cp_size]
+            softmax_lse_ = softmax_lse_.view(batch_size, softmax_lse_.shape[0]//batch_size, softmax_lse_.shape[1]).transpose(1, 2).contiguous()
+
+        out_save = out_no_loss if cp_lossless_out else out_
+        lse_save = softmax_lse_no_loss if cp_lossless_lse else softmax_lse_
+
+        ctx.save_for_backward(q, k, v, out_save, lse_save, cu_seqlens_q, cu_seqlens_k)
+        ctx.cp_group = cp_group
+        ctx.rng_state = rng_state
+        ctx.max_seqlen_q = max_seqlen_q
+        ctx.max_seqlen_k = max_seqlen_k
+        ctx.batch_size = batch_size
+        ctx.dropout_p = dropout_p
+        ctx.causal = causal
+        ctx.softmax_scale = softmax_scale
+        ctx.deterministic=deterministic
+        ctx.cp_lossless_out=cp_lossless_out
+        ctx.cp_lossless_lse=cp_lossless_lse
+        ctx.cp_lossless_dqkv=cp_lossless_dqkv
+
+        out = out_no_loss_ if cp_lossless_out else out
+        return out.view(-1, *out.shape[-2:])
+
+    @staticmethod
+    def backward(ctx, dout, *args):
+        q, k, v, out, softmax_lse, cu_seqlens_q, cu_seqlens_k = ctx.saved_tensors
+
+        cp_size = get_distributed_world_size(ctx.cp_group)
+        rank = get_distributed_rank(ctx.cp_group)
+        batch_size = ctx.batch_size
+
+        if ctx.cp_lossless_dqkv:
+            # [b, s, h, d]
+            dout = dout.view(batch_size, dout.shape[0]//batch_size, *dout.shape[1:])
+            # list [cp_size, b, 2, s//2, h, d], [b*s*cp_size, h, d]
+            dout_ag, dout = flash_attn_ag_communication(dout, ctx.cp_group)
+
+            # [b*s*cp_size, h, d]
+            dq, dk, dv = [torch.empty_like(x) for x in [q, k, v]]
+
+            _flash_attn_backward(dout, q, k, v, out, softmax_lse, dq, dk, dv,
+                                 cu_seqlens_q*cp_size,
+                                 cu_seqlens_k*cp_size,
+                                 ctx.max_seqlen_q*cp_size,
+                                 ctx.max_seqlen_k*cp_size,
+                                 ctx.dropout_p,
+                                 ctx.softmax_scale,
+                                 ctx.causal,
+                                 rng_state=ctx.rng_state,
+                                 num_splits=1 if ctx.deterministic else 0)
+
+            # [b, 2*cp_size, s//2, h, d]
+            dq, dk, dv = [x.view(batch_size, 2*cp_size, x.shape[0]//(batch_size*2*cp_size), *x.shape[1:]) for x in [dq, dk, dv]]
+            # [b, s, h, d]
+            dq, dk, dv = [torch.cat([x[:, rank, ...], x[:, (2*cp_size-rank-1), ...]], dim=1) for x in [dq, dk, dv]]
+        else:
+            idx = torch.tensor([rank, 2*cp_size-rank-1], device=q.device)
+            # [b, 2*cp_size, s//2, h, d]
+            q, k, v, out = [x.view(batch_size, 2*cp_size, x.shape[0]//(batch_size*2*cp_size), *x.shape[1:]) for x in [q, k, v, out]]
+            # [b, 2, s//2, h, d]
+            q, out = [x.index_select(1, idx) for x in [q, out]]
+            # [b, h, 2*cp_size, s//2]
+            softmax_lse = softmax_lse.view(*softmax_lse.shape[:-1], 2*cp_size, softmax_lse.shape[-1]//(2*cp_size))
+            # [b, h, 2, s//2]
+            softmax_lse_ = softmax_lse.index_select(-2, idx)
+            # [b, h, s]
+            softmax_lse = softmax_lse_.view(*softmax_lse_.shape[:-2], -1)
+            # [b, 2, s//2, h, d] or [b, 2*cp_size, s//2, h, d]
+            dq, dk, dv = [torch.empty_like(x) for x in [q, k, v]]
+            # [b, 2, s//2, h, d]
+            dout = dout.view(*q.shape)
+            for i in range(cp_size):
+                kv_rank = (rank + i + 1) % cp_size
+                kv_idx = torch.tensor([kv_rank, 2*cp_size-kv_rank-1], device=k.device)
+                # [b, 2, s//2, h, d]
+                k_, v_ = [x.index_select(1, kv_idx) for x in [k, v]]
+                if i == (cp_size-1):
+                    # [b*s, h, d]
+                    q_, k_, v_, out_, dout_ = [x.contiguous().view(-1, *x.shape[-2:]) for x in [q, k_, v_, out, dout]]
+                    dq_, dk_, dv_ = [torch.empty_like(x) for x in [q_, k_, v_]]
+                    _flash_attn_backward(
+                        dout_, q_, k_, v_, out_, softmax_lse,
+                        dq_, dk_, dv_, cu_seqlens_q, cu_seqlens_k, ctx.max_seqlen_q, ctx.max_seqlen_k,
+                        ctx.dropout_p, ctx.softmax_scale, True, rng_state=ctx.rng_state,
+                        num_splits=1 if ctx.deterministic else 0,
+                    )
+                elif i >= (cp_size-rank-1):
+                    # [b*s, h, d] or [b*s//2, h, d]
+                    q_, k_, v_, out_, dout_ = [x.contiguous().view(-1, *x.shape[-2:]) for x in [q, k_[:, 0, ...], v_[:, 0, ...], out, dout]]
+                    dq_, dk_, dv_ = [torch.empty_like(x) for x in [q_, k_, v_]]
+                    _flash_attn_backward(
+                        dout_, q_, k_, v_, out_, softmax_lse,
+                        dq_, dk_, dv_, cu_seqlens_q, cu_seqlens_k//2, ctx.max_seqlen_q, ctx.max_seqlen_k//2,
+                        ctx.dropout_p, ctx.softmax_scale, False, rng_state=ctx.rng_state,
+                        num_splits=1 if ctx.deterministic else 0,
+                    )
+                else:
+                    # [b*s, h, d] or [b*s//2, h, d]
+                    q_, k_, v_, out_, dout_ = [x.contiguous().view(-1, *x.shape[-2:]) for x in [q[:, 1, ...], k_, v_, out[:, 1, ...], dout[:, 1, ...]]]
+                    dq_, dk_, dv_ = [torch.empty_like(x) for x in [q_, k_, v_]]
+                    _flash_attn_backward(
+                        dout_, q_, k_, v_, out_, softmax_lse_[..., 1, :],
+                        dq_, dk_, dv_, cu_seqlens_q//2, cu_seqlens_k, ctx.max_seqlen_q//2, ctx.max_seqlen_k,
+                        ctx.dropout_p, ctx.softmax_scale, False, rng_state=ctx.rng_state,
+                        num_splits=1 if ctx.deterministic else 0,
+                    )
+
+                if i >= (cp_size-rank-1):
+                    # [b, 2, s//2, h, d]
+                    dq_ = dq_.view(*dq.shape)
+                else:
+                    # [b, s//2, h, d]
+                    dq_ = dq_.view(dq.shape[0], *dq.shape[2:])
+
+                if i > (cp_size-rank-1):
+                    dq.add_(dq_)
+                elif i == (cp_size-rank-1):
+                    if rank == (cp_size-1):
+                        dq.copy_(dq_)
+                    else:
+                        dq[:, 0, ...].copy_(dq_[:, 0, ...])
+                        dq[:, 1, ...].add_(dq_[:, 1, ...])
+                elif i > 0:
+                    dq[:, 1, ...].add_(dq_)
+                else:
+                    dq[:, 1, ...].copy_(dq_)
+
+                if i >= (cp_size-rank-1) and i != (cp_size-1):
+                    # [b, s//2, h, d]
+                    dk_ = dk_.view(dk.shape[0], *dk.shape[2:])
+                    dv_ = dv_.view(dv.shape[0], *dv.shape[2:])
+                    dk[:, kv_rank, ...].copy_(dk_)
+                    dv[:, kv_rank, ...].copy_(dv_)
+                    dk[:, 2*cp_size-kv_rank-1, ...].zero_()
+                    dv[:, 2*cp_size-kv_rank-1, ...].zero_()
+                else:
+                    # [b, 2, s//2, h, d]
+                    dk_ = dk_.view(dk.shape[0], 2, *dk.shape[2:])
+                    dv_ = dv_.view(dv.shape[0], 2, *dv.shape[2:])
+                    dk[:, kv_rank, ...].copy_(dk_[:, 0, ...])
+                    dv[:, kv_rank, ...].copy_(dv_[:, 0, ...])
+                    dk[:, 2*cp_size-kv_rank-1, ...].copy_(dk_[:, 1, ...])
+                    dv[:, 2*cp_size-kv_rank-1, ...].copy_(dv_[:, 1, ...])
+
+            # [b, s, h, d]
+            dq = dq.view(dq.shape[0], -1, *dq.shape[-2:])
+            # [b, 2*cp_size, s//2, h, d]
+            torch.distributed.all_reduce(dk, group=ctx.cp_group)
+            torch.distributed.all_reduce(dv, group=ctx.cp_group)
+            # [b, 2, s//2, h, d]
+            dk, dv = [x.index_select(1, idx) for x in [dk, dv]]
+            # [b, s, h, d]
+            dk, dv = [x.view(x.shape[0], -1, *x.shape[-2:]) for x in [dk, dv]]
+
+        return dq, dk, dv, None, None, None, None, None, None, None, None, None, None, None, None, None, None
+
+
+def flash_attn_a2a_communicate(x, scatter_dim, gather_dim, cp_group):
+    cp_size = get_distributed_world_size(cp_group)
+    assert(x.shape[scatter_dim] % cp_size == 0), f"scatter_dim size ({x.shape[scatter_dim]}) requires to be divisible by cp_size ({cp_size})"
+
+    x = x.view(*x.shape[:scatter_dim], cp_size, x.shape[scatter_dim]//cp_size, *x.shape[(scatter_dim+1):])
+    indices = torch.arange(cp_size, device=x.device)
+    x_scatter = [x.index_select(scatter_dim, indices[i]).squeeze(scatter_dim) for i in range(cp_size)]
+    x_gather = [torch.empty_like(x_scatter[i]) for i in range(cp_size)]
+    torch.distributed.all_to_all(x_gather, x_scatter, cp_group)
+    x = torch.cat(x_gather, dim=gather_dim)
+
+    return x
+
+
+class FlashAttnUnpaddedFuncWithCPSplitHead(torch.autograd.Function):
+
+    @staticmethod
+    def forward(ctx, q, k, v, cu_seqlens_q, cu_seqlens_k, max_seqlen_q, max_seqlen_k, dropout_p,
+                cp_group, softmax_scale=None, causal=False, deterministic=False):
+        if softmax_scale is None:
+            softmax_scale = q.shape[-1] ** (-0.5)
+
+        cp_size = get_distributed_world_size(cp_group)
+        batch_size = q.shape[0]
+
+        # [b, s*cp_size, h//cp_size, d]
+        q, k, v = [flash_attn_a2a_communicate(x, 2, 1, cp_group) for x in [q, k, v]]
+        # [b*s*cp_size, h//cp_size, d]
+        q, k, v = [x.view(-1, *x.shape[-2:]) for x in [q, k, v]]
+        # [b*s*cp_size, h//cp_size, d]
+        out_ = torch.empty_like(q)
+
+        _, softmax_lse, rng_state, _ = _flash_attn_forward(q, k, v, out_,
+                                                           cu_seqlens_q*cp_size,
+                                                           cu_seqlens_k*cp_size,
+                                                           max_seqlen_q*cp_size,
+                                                           max_seqlen_k*cp_size,
+                                                           dropout_p,
+                                                           softmax_scale,
+                                                           causal,
+                                                           return_softmax=False)
+
+        # [b, s*cp_size, h//cp_size, d]
+        out = out_.view(batch_size, out_.shape[0]//batch_size, *out_.shape[1:])
+        # [b, s, h, d]
+        out = flash_attn_a2a_communicate(out, 1, 2, cp_group)
+        # [b*s, h, d]
+        out = out.view(-1, *out.shape[-2:])
+
+        ctx.save_for_backward(q, k, v, out_, softmax_lse, cu_seqlens_q, cu_seqlens_k)
+        ctx.cp_group = cp_group
+        ctx.rng_state = rng_state
+        ctx.max_seqlen_q = max_seqlen_q
+        ctx.max_seqlen_k = max_seqlen_k
+        ctx.batch_size = batch_size
+        ctx.dropout_p = dropout_p
+        ctx.causal = causal
+        ctx.softmax_scale = softmax_scale
+        ctx.deterministic=deterministic
+
+        return out
+
+    @staticmethod
+    def backward(ctx, dout, *args):
+        q, k, v, out, softmax_lse, cu_seqlens_q, cu_seqlens_k = ctx.saved_tensors
+
+        cp_size = get_distributed_world_size(ctx.cp_group)
+        batch_size = ctx.batch_size
+
+        # [b, s, h, d]
+        dout = dout.view(batch_size, dout.shape[0]//batch_size, *dout.shape[1:])
+        # [b, s*cp_size, h//cp_size, d]
+        dout = flash_attn_a2a_communicate(dout, 2, 1, ctx.cp_group)
+        # [b*s*cp_size, h//cp_size, d]
+        dout = dout.view(-1, *dout.shape[-2:])
+        # [b*s*cp_size, h//cp_size, d]
+        dq, dk, dv = [torch.empty_like(x) for x in [q, k, v]]
+
+        _flash_attn_backward(dout, q, k, v, out, softmax_lse, dq, dk, dv,
+                             cu_seqlens_q*cp_size,
+                             cu_seqlens_k*cp_size,
+                             ctx.max_seqlen_q*cp_size,
+                             ctx.max_seqlen_k*cp_size,
+                             ctx.dropout_p,
+                             ctx.softmax_scale,
+                             ctx.causal,
+                             rng_state=ctx.rng_state,
+                             num_splits=1 if ctx.deterministic else 0)
+
+        # [b, s*cp_size, h//cp_size, d]
+        dq, dk, dv = [x.view(batch_size, x.shape[0]//batch_size, *x.shape[1:]) for x in [dq, dk, dv]]
+        # [b, s, h, d]
+        dq, dk, dv = [flash_attn_a2a_communicate(x, 1, 2, ctx.cp_group) for x in [dq, dk, dv]]
+
+        return dq, dk, dv, None, None, None, None, None, None, None, None, None
+
 
 def flash_attn_forward_func_with_cp(q, k, v, cu_seqlens_q, cu_seqlens_k,
                                     max_seqlen_q, max_seqlen_k, dropout_p,
-                                    cp_group, cp_global_ranks,cp_stream,
+                                    cp_group, cp_global_ranks, cp_stream, cp_split_dim,
                                     softmax_scale=None, causal=False,
-                                    deterministic=False):
-    out = FlashAttnUnpaddedFuncWithCP.apply(
-        q, k, v, cu_seqlens_q, cu_seqlens_k, max_seqlen_q, max_seqlen_k, dropout_p,
-        cp_group, cp_global_ranks, cp_stream, softmax_scale, causal, deterministic
-    )
+                                    deterministic=False, cp_lossless_out=False,
+                                    cp_lossless_lse=False, cp_lossless_dqkv=False):
+    if cp_split_dim == "sequence":
+        out = FlashAttnUnpaddedFuncWithCPSplitSeq.apply(
+            q, k, v, cu_seqlens_q, cu_seqlens_k, max_seqlen_q, max_seqlen_k, dropout_p,
+            cp_group, cp_global_ranks, cp_stream, softmax_scale, causal, deterministic)
+        #out = FlashAttnUnpaddedFuncWithCPSplitSeq_v0.apply(
+        #    q, k, v, cu_seqlens_q, cu_seqlens_k, max_seqlen_q, max_seqlen_k, dropout_p,
+        #    cp_group, cp_global_ranks, cp_stream, softmax_scale, causal, deterministic,
+        #    cp_lossless_out, cp_lossless_lse, cp_lossless_dqkv)
+    elif cp_split_dim == "head":
+        out = FlashAttnUnpaddedFuncWithCPSplitHead.apply(
+            q, k, v, cu_seqlens_q, cu_seqlens_k, max_seqlen_q, max_seqlen_k, dropout_p,
+            cp_group, softmax_scale, causal, deterministic)
+    else:
+        assert(False), f"Context parallelism does not support split dim of {cp_split_dim}"
+
     return out
 
 
@@ -759,6 +1149,10 @@ class FlashAttention(torch.nn.Module):
         cp_group: Optional[dist_group_type] = None,
         cp_global_ranks: Union[int] = None,
         cp_stream: torch.cuda.Stream = None,
+        cp_split_dim: str = "sequence",
+        cp_lossless_out: bool = False,
+        cp_lossless_lse: bool = False,
+        cp_lossless_dqkv: bool = False,
     ) -> torch.Tensor:
         """flash-attn fprop"""
 
@@ -820,10 +1214,13 @@ class FlashAttention(torch.nn.Module):
                     query_layer, key_layer, value_layer,
                     cu_seqlens, cu_seqlens, max_seqlen, max_seqlen,
                     self.attention_dropout if self.training else 0.0,
-                    cp_group, cp_global_ranks, cp_stream,
+                    cp_group, cp_global_ranks, cp_stream, cp_split_dim,
                     softmax_scale=1.0/self.norm_factor,
                     causal=self.attn_causal_mask,
                     deterministic=self.deterministic
+                    cp_lossless_out=cp_lossless_out,
+                    cp_lossless_lse=cp_lossless_lse,
+                    cp_lossless_dqkv=cp_lossless_dqkv,
                 )
 
         # [(b sq), np, hn] -> [sq, b, (np hn)]
@@ -1175,6 +1572,10 @@ class DotProductAttention(torch.nn.Module):
         cp_group: Optional[dist_group_type] = None,
         cp_global_ranks: Union[int] = None,
         cp_stream: torch.cuda.Stream = None,
+        cp_split_dim: str = "sequence",
+        cp_lossless_out: bool = False,
+        cp_lossless_lse: bool = False,
+        cp_lossless_dqkv: bool = False,
     ) -> None:
         super().__init__()
 
@@ -1185,6 +1586,10 @@ class DotProductAttention(torch.nn.Module):
         self.cp_group = cp_group
         self.cp_global_ranks = cp_global_ranks
         self.cp_stream = cp_stream
+        self.cp_split_dim = cp_split_dim
+        self.cp_lossless_out = cp_lossless_out
+        self.cp_lossless_lse = cp_lossless_lse
+        self.cp_lossless_dqkv = cp_lossless_dqkv
 
         self.hidden_size_per_attention_head = kv_channels
         self.num_gqa_groups = (
@@ -1368,13 +1773,21 @@ class DotProductAttention(torch.nn.Module):
                                                             value_layer,
                                                             self.cp_group,
                                                             self.cp_global_ranks,
-                                                            self.cp_stream)
+                                                            self.cp_stream,
+                                                            self.cp_split_dim,
+                                                            self.cp_lossless_out,
+                                                            self.cp_lossless_lse,
+                                                            self.cp_lossless_dqkv)
             return self.flash_attention(query_layer,
                                         key_layer,
                                         value_layer,
                                         self.cp_group,
                                         self.cp_global_ranks,
-                                        self.cp_stream)
+                                        self.cp_stream,
+                                        self.cp_split_dim,
+                                        self.cp_lossless_out,
+                                        self.cp_lossless_lse,
+                                        self.cp_lossless_dqkv)
 
         assert (
             self.cp_group is None or get_distributed_world_size(self.cp_group) == 1
@@ -1611,11 +2024,19 @@ class MultiHeadAttention(torch.nn.Module):
         cp_group: Union[dist_group_type, None],
         cp_global_ranks: Union[int],
         cp_stream: torch.cuda.Stream,
+        cp_split_dim: str = "sequence",
+        cp_lossless_out: bool = False,
+        cp_lossless_lse: bool = False,
+        cp_lossless_dqkv: bool = False,
     ) -> None:
         """Set CP group and CP dual-stream running"""
         self.core_attention.cp_group = cp_group
         self.core_attention.cp_global_ranks = cp_global_ranks
         self.core_attention.cp_stream = cp_stream
+        self.core_attention.cp_split_dim = cp_split_dim
+        self.core_attention.cp_lossless_out = cp_lossless_out
+        self.core_attention.cp_lossless_lse = cp_lossless_lse
+        self.core_attention.cp_lossless_dqkv = cp_lossless_dqkv
 
     def forward(
         self,
