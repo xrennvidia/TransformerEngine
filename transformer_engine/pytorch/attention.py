@@ -1997,24 +1997,24 @@ class DotProductAttention(torch.nn.Module):
                                                             key_layer,
                                                             value_layer,
                                                             attn_mask_type=attn_mask_type,
-                                                            self.cp_group,
-                                                            self.cp_global_ranks,
-                                                            self.cp_stream,
-                                                            self.cp_split_dim,
-                                                            self.cp_lossless_out,
-                                                            self.cp_lossless_lse,
-                                                            self.cp_lossless_dqkv)
+                                                            cp_group=self.cp_group,
+                                                            cp_global_ranks=self.cp_global_ranks,
+                                                            cp_stream=self.cp_stream,
+                                                            cp_split_dim=self.cp_split_dim,
+                                                            cp_lossless_out=self.cp_lossless_out,
+                                                            cp_lossless_lse=self.cp_lossless_lse,
+                                                            cp_lossless_dqkv=self.cp_lossless_dqkv)
             return self.flash_attention(query_layer,
                                         key_layer,
                                         value_layer,
                                         attn_mask_type=attn_mask_type,
-                                        self.cp_group,
-                                        self.cp_global_ranks,
-                                        self.cp_stream,
-                                        self.cp_split_dim,
-                                        self.cp_lossless_out,
-                                        self.cp_lossless_lse,
-                                        self.cp_lossless_dqkv)
+                                        cp_group=self.cp_group,
+                                        cp_global_ranks=self.cp_global_ranks,
+                                        cp_stream=self.cp_stream,
+                                        cp_split_dim=self.cp_split_dim,
+                                        cp_lossless_out=self.cp_lossless_out,
+                                        cp_lossless_lse=self.cp_lossless_lse,
+                                        cp_lossless_dqkv=self.cp_lossless_dqkv)
 
         assert (
             self.cp_group is None or get_distributed_world_size(self.cp_group) == 1
