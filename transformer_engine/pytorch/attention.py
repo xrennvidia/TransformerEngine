@@ -54,6 +54,8 @@ _flash_attn_2_available = _flash_attn_version >= packaging.version.Version("2")
 if _flash_attn_2_available:
     from flash_attn.flash_attn_interface import flash_attn_varlen_func as flash_attn_forward_func # pylint: disable=no-name-in-module
     from flash_attn_2_cuda import varlen_bwd as flash_attn_cuda_bwd # pylint: disable=no-name-in-module
+    from flash_attn.flash_attn_interface import _flash_attn_varlen_forward as _flash_attn_forward
+    from flash_attn.flash_attn_interface import _flash_attn_varlen_backward as _flash_attn_backward
 else:
     from flash_attn.flash_attn_interface import flash_attn_unpadded_func as flash_attn_forward_func # pylint: disable=no-name-in-module,ungrouped-imports
     from flash_attn.flash_attn_interface import _flash_attn_forward, _flash_attn_backward
@@ -146,6 +148,8 @@ class FlashAttnUnpaddedFuncWithCPSplitSeq(torch.autograd.Function):
 
         # [b, s, np, hn] -> [b, 2, s//2, np, hn]
         q, k, v = [x.view(x.shape[0], 2, x.shape[1]//2, *x.shape[2:]) for x in [q, k, v]]
+        if _flash_attn_2_available:
+            assert(q.shape[-1] % 8 == 0), "hidden size per attention head should be multiple of 8"
         # Flash Attn inputs
         q_inputs = [None, None]
         kv_inputs = [None, None]
@@ -185,40 +189,64 @@ class FlashAttnUnpaddedFuncWithCPSplitSeq(torch.autograd.Function):
                         if i == 0:
                             # [b, 2, sq//2, np, hn] -> [b*sq, np, hn]
                             q_inputs[i%2] = q.view(-1, *q.shape[-2:])
-                            out_per_step[i] = torch.empty_like(q_inputs[i%2])
                             # [2, b, 2, sk//2, np, hn] -> [2, b*sk, np, hn]
                             kv_inputs[i%2] = kv_inputs[i%2].view(2, -1, *k.shape[-2:])
-                            _, softmax_lse_per_step[i], rng_states[i], _ = _flash_attn_forward(
-                                q_inputs[i%2], kv_inputs[i%2][0], kv_inputs[i%2][1],
-                                out_per_step[i], cu_seqlens_q, cu_seqlens_k,
-                                max_seqlen_q, max_seqlen_k, dropout_p, softmax_scale,
-                                causal=True, return_softmax=False,
-                            )
+                            if _flash_attn_2_available:
+                                _, _, _, _, out_per_step[i], \
+                                softmax_lse_per_step[i], _, rng_states[i] = _flash_attn_forward(
+                                    q_inputs[i%2], kv_inputs[i%2][0], kv_inputs[i%2][1],
+                                    cu_seqlens_q, cu_seqlens_k, max_seqlen_q, max_seqlen_k,
+                                    dropout_p, softmax_scale, causal=True, return_softmax=False,
+                                )
+                            else:
+                                out_per_step[i] = torch.empty_like(q_inputs[i%2])
+                                _, softmax_lse_per_step[i], rng_states[i], _ = _flash_attn_forward(
+                                    q_inputs[i%2], kv_inputs[i%2][0], kv_inputs[i%2][1],
+                                    out_per_step[i], cu_seqlens_q, cu_seqlens_k,
+                                    max_seqlen_q, max_seqlen_k, dropout_p, softmax_scale,
+                                    causal=True, return_softmax=False,
+                                )
                         elif i <= rank:
                             # [b, 2, sq//2, np, hn] -> [b*sq, np, hn]
                             q_inputs[i%2] = q.view(-1, *q.shape[-2:])
-                            out_per_step[i] = torch.empty_like(q_inputs[i%2])
                             # [2, b, sk//2, np, hn] -> [2, b*sk//2, np, hn]
                             kv_inputs[i%2] = kv_inputs[i%2][:, :, 0, ...].contiguous()
                             kv_inputs[i%2] = kv_inputs[i%2].view(2, -1, *k.shape[-2:])
-                            _, softmax_lse_per_step[i], rng_states[i], _ = _flash_attn_forward(
-                                q_inputs[i%2], kv_inputs[i%2][0], kv_inputs[i%2][1],
-                                out_per_step[i], cu_seqlens_q, cu_seqlens_k//2,
-                                max_seqlen_q, max_seqlen_k//2, dropout_p, softmax_scale,
-                                causal=False, return_softmax=False,
-                            )
+                            if _flash_attn_2_available:
+                                _, _, _, _, out_per_step[i], \
+                                softmax_lse_per_step[i], _, rng_states[i] = _flash_attn_forward(
+                                    q_inputs[i%2], kv_inputs[i%2][0], kv_inputs[i%2][1],
+                                    cu_seqlens_q, cu_seqlens_k//2, max_seqlen_q, max_seqlen_k//2,
+                                    dropout_p, softmax_scale, causal=False, return_softmax=False,
+                                )
+                            else:
+                                out_per_step[i] = torch.empty_like(q_inputs[i%2])
+                                _, softmax_lse_per_step[i], rng_states[i], _ = _flash_attn_forward(
+                                    q_inputs[i%2], kv_inputs[i%2][0], kv_inputs[i%2][1],
+                                    out_per_step[i], cu_seqlens_q, cu_seqlens_k//2,
+                                    max_seqlen_q, max_seqlen_k//2, dropout_p, softmax_scale,
+                                    causal=False, return_softmax=False,
+                                )
                         else:
                             # [b, sq//2, np, hn] -> [b*sq//2, np, hn]
                             q_inputs[i%2] = q[:, 1, ...].contiguous().view(-1, *q.shape[-2:])
-                            out_per_step[i] = torch.empty_like(q_inputs[i%2])
                             # [2, b, 2, sk//2, np, hn] -> [2, b*sk, np, hn]
                             kv_inputs[i%2] = kv_inputs[i%2].view(2, -1, *k.shape[-2:])
-                            _, softmax_lse_per_step[i], rng_states[i], _ = _flash_attn_forward(
-                                q_inputs[i%2], kv_inputs[i%2][0], kv_inputs[i%2][1],
-                                out_per_step[i], cu_seqlens_q//2, cu_seqlens_k,
-                                max_seqlen_q//2, max_seqlen_k, dropout_p, softmax_scale,
-                                causal=False, return_softmax=False,
-                            )
+                            if _flash_attn_2_available:
+                                _, _, _, _, out_per_step[i], \
+                                softmax_lse_per_step[i], _, rng_states[i] = _flash_attn_forward(
+                                    q_inputs[i%2], kv_inputs[i%2][0], kv_inputs[i%2][1],
+                                    cu_seqlens_q//2, cu_seqlens_k, max_seqlen_q//2, max_seqlen_k,
+                                    dropout_p, softmax_scale, causal=False, return_softmax=False,
+                                )
+                            else:
+                                out_per_step[i] = torch.empty_like(q_inputs[i%2])
+                                _, softmax_lse_per_step[i], rng_states[i], _ = _flash_attn_forward(
+                                    q_inputs[i%2], kv_inputs[i%2][0], kv_inputs[i%2][1],
+                                    out_per_step[i], cu_seqlens_q//2, cu_seqlens_k,
+                                    max_seqlen_q//2, max_seqlen_k, dropout_p, softmax_scale,
+                                    causal=False, return_softmax=False,
+                                )
                     else:
                         assert False, "Not implemented yet!"
 
@@ -302,6 +330,10 @@ class FlashAttnUnpaddedFuncWithCPSplitSeq(torch.autograd.Function):
         p2p_comm_buffers[0][0].copy_(kv)
         send_recv_reqs = []
 
+        fa_optional_backward_kwargs = {}
+        if not _flash_attn_2_available:
+            fa_optional_backward_kwargs["num_splits"] = 1 if ctx.deterministic else 0
+
         for i in range(cp_size):
             # wait until KV is received
             for req in send_recv_reqs:
@@ -343,7 +375,7 @@ class FlashAttnUnpaddedFuncWithCPSplitSeq(torch.autograd.Function):
                         ctx.max_seqlen_q, ctx.max_seqlen_k,
                         ctx.dropout_p, ctx.softmax_scale, True,
                         rng_state=ctx.rng_states[cp_size-i-1],
-                        num_splits=1 if ctx.deterministic else 0,
+                        **fa_optional_backward_kwargs
                     )
                 elif i >= (cp_size-rank-1):
                     # [b, 2, sq//2, np, hn] -> [b*sq, np, hn]
@@ -361,7 +393,7 @@ class FlashAttnUnpaddedFuncWithCPSplitSeq(torch.autograd.Function):
                         ctx.max_seqlen_q, ctx.max_seqlen_k//2,
                         ctx.dropout_p, ctx.softmax_scale, False,
                         rng_state=ctx.rng_states[cp_size-i-1],
-                        num_splits=1 if ctx.deterministic else 0,
+                        **fa_optional_backward_kwargs
                     )
                 else:
                     # [b, sq//2, np, hn] -> [b*sq//2, np, hn]
@@ -379,7 +411,7 @@ class FlashAttnUnpaddedFuncWithCPSplitSeq(torch.autograd.Function):
                         ctx.max_seqlen_q//2, ctx.max_seqlen_k,
                         ctx.dropout_p, ctx.softmax_scale, False,
                         rng_state=ctx.rng_states[cp_size-i-1],
-                        num_splits=1 if ctx.deterministic else 0,
+                        **fa_optional_backward_kwargs
                     )
 
                 if i >= (cp_size-rank-1):
@@ -1328,8 +1360,6 @@ class FlashAttention(torch.nn.Module):
                     **fa_optional_forward_kwargs
                 )
         else:
-            if _flash_attn_2_available:
-                assert False, "Context parallelism is only implemented with Flash Attention v1!"
             with self.attention_dropout_ctx():
                 output = flash_attn_forward_func_with_cp(
                     query_layer, key_layer, value_layer,
