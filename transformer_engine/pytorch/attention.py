@@ -508,11 +508,20 @@ class FlashAttnUnpaddedFuncWithCPSplitSeq_v0(torch.autograd.Function):
         k_ag, k = flash_attn_ag_communication(k, cp_group)
         v_ag, v = flash_attn_ag_communication(v, cp_group)
 
+        if _flash_attn_2_available:
+            assert(q.shape[-1] % 8 == 0), "hidden size per attention head should be multiple of 8"
+
         if cp_lossless_out or cp_lossless_lse:
-            out_no_loss, softmax_lse_no_loss, rng_state, _ = _flash_attn_forward(
-                q, k, v, torch.empty_like(q), cu_seqlens_q*cp_size, cu_seqlens_k*cp_size,
-                max_seqlen_q*cp_size, max_seqlen_k*cp_size, dropout_p, softmax_scale,
-                causal, return_softmax=False)
+            if _flash_attn_2_available:
+                _, _, _, _, out_no_loss, softmax_lse_no_loss, _, rng_state = _flash_attn_forward(
+                    q, k, v, cu_seqlens_q*cp_size, cu_seqlens_k*cp_size,
+                    max_seqlen_q*cp_size, max_seqlen_k*cp_size, dropout_p, softmax_scale,
+                    causal, return_softmax=False)
+            else:
+                out_no_loss, softmax_lse_no_loss, rng_state, _ = _flash_attn_forward(
+                    q, k, v, torch.empty_like(q), cu_seqlens_q*cp_size, cu_seqlens_k*cp_size,
+                    max_seqlen_q*cp_size, max_seqlen_k*cp_size, dropout_p, softmax_scale,
+                    causal, return_softmax=False)
 
         if cp_lossless_out:
             # [b, 2*cp_size, s//2, h, d]
@@ -539,28 +548,43 @@ class FlashAttnUnpaddedFuncWithCPSplitSeq_v0(torch.autograd.Function):
             if i == 0:
                 # [b*s, h, d]
                 q_, k_, v_ = [x.view(-1, *x.shape[-2:]) for x in [q_, k_, v_]]
-                out_per_step[i] = torch.empty_like(q_)
-                _, softmax_lse_per_step[i], rng_state, _ = _flash_attn_forward(
-                     q_, k_, v_, out_per_step[i], cu_seqlens_q, cu_seqlens_k, max_seqlen_q, max_seqlen_k,
-                     dropout_p, softmax_scale, causal=True, return_softmax=False)
+                if _flash_attn_2_available:
+                    _, _, _, _, out_per_step[i], softmax_lse_per_step[i], _, rng_state = _flash_attn_forward(
+                         q_, k_, v_, cu_seqlens_q, cu_seqlens_k, max_seqlen_q, max_seqlen_k,
+                         dropout_p, softmax_scale, causal=True, return_softmax=False)
+                else:
+                    out_per_step[i] = torch.empty_like(q_)
+                    _, softmax_lse_per_step[i], rng_state, _ = _flash_attn_forward(
+                         q_, k_, v_, out_per_step[i], cu_seqlens_q, cu_seqlens_k, max_seqlen_q, max_seqlen_k,
+                         dropout_p, softmax_scale, causal=True, return_softmax=False)
             elif i <= rank:
                 # [b*s, h, d]
                 q_ = q_.view(-1, *q_.shape[-2:])
-                out_per_step[i] = torch.empty_like(q_)
                 # [b*s//2, h, d]
                 k_, v_ = [x.contiguous().view(-1, *x.shape[-2:]) for x in [k_[:, 0, ...], v_[:, 0, ...]]]
-                _, softmax_lse_per_step[i], rng_state, _ = _flash_attn_forward(
-                     q_, k_, v_, out_per_step[i], cu_seqlens_q, cu_seqlens_k//2, max_seqlen_q, max_seqlen_k//2,
-                     dropout_p, softmax_scale, causal=False, return_softmax=False)
+                if _flash_attn_2_available:
+                    _, _, _, _, out_per_step[i], softmax_lse_per_step[i], _, rng_state = _flash_attn_forward(
+                         q_, k_, v_, cu_seqlens_q, cu_seqlens_k//2, max_seqlen_q, max_seqlen_k//2,
+                         dropout_p, softmax_scale, causal=False, return_softmax=False)
+                else:
+                    out_per_step[i] = torch.empty_like(q_)
+                    _, softmax_lse_per_step[i], rng_state, _ = _flash_attn_forward(
+                         q_, k_, v_, out_per_step[i], cu_seqlens_q, cu_seqlens_k//2, max_seqlen_q, max_seqlen_k//2,
+                         dropout_p, softmax_scale, causal=False, return_softmax=False)
             else:
                 # [b*s//2, h, d]
                 q_ = q_[:, 1, ...].contiguous().view(-1, *q_.shape[-2:])
-                out_per_step[i] = torch.empty_like(q_)
                 # [b*s, h, d]
                 k_, v_ = [x.view(-1, *x.shape[-2:]) for x in [k_, v_]]
-                _, softmax_lse_per_step[i], rng_state, _ = _flash_attn_forward(
-                     q_, k_, v_, out_per_step[i], cu_seqlens_q//2, cu_seqlens_k, max_seqlen_q//2, max_seqlen_k,
-                     dropout_p, softmax_scale, causal=False, return_softmax=False)
+                if _flash_attn_2_available:
+                    _, _, _, _, out_per_step[i], softmax_lse_per_step[i], _, rng_state = _flash_attn_forward(
+                         q_, k_, v_, cu_seqlens_q//2, cu_seqlens_k, max_seqlen_q//2, max_seqlen_k,
+                         dropout_p, softmax_scale, causal=False, return_softmax=False)
+                else:
+                    out_per_step[i] = torch.empty_like(q_)
+                    _, softmax_lse_per_step[i], rng_state, _ = _flash_attn_forward(
+                         q_, k_, v_, out_per_step[i], cu_seqlens_q//2, cu_seqlens_k, max_seqlen_q//2, max_seqlen_k,
+                         dropout_p, softmax_scale, causal=False, return_softmax=False)
 
             if not cp_lossless_lse:
                 if i == 0:
@@ -626,6 +650,10 @@ class FlashAttnUnpaddedFuncWithCPSplitSeq_v0(torch.autograd.Function):
         rank = get_distributed_rank(ctx.cp_group)
         batch_size = ctx.batch_size
 
+        fa_optional_backward_kwargs = {}
+        if not _flash_attn_2_available:
+            fa_optional_backward_kwargs["num_splits"] = 1 if ctx.deterministic else 0
+
         if ctx.cp_lossless_dqkv:
             # [b, s, h, d]
             dout = dout.view(batch_size, dout.shape[0]//batch_size, *dout.shape[1:])
@@ -644,7 +672,7 @@ class FlashAttnUnpaddedFuncWithCPSplitSeq_v0(torch.autograd.Function):
                                  ctx.softmax_scale,
                                  ctx.causal,
                                  rng_state=ctx.rng_state,
-                                 num_splits=1 if ctx.deterministic else 0)
+                                 **fa_optional_backward_kwargs)
 
             # [b, 2*cp_size, s//2, h, d]
             dq, dk, dv = [x.view(batch_size, 2*cp_size, x.shape[0]//(batch_size*2*cp_size), *x.shape[1:]) for x in [dq, dk, dv]]
@@ -679,7 +707,7 @@ class FlashAttnUnpaddedFuncWithCPSplitSeq_v0(torch.autograd.Function):
                         dout_, q_, k_, v_, out_, softmax_lse,
                         dq_, dk_, dv_, cu_seqlens_q, cu_seqlens_k, ctx.max_seqlen_q, ctx.max_seqlen_k,
                         ctx.dropout_p, ctx.softmax_scale, True, rng_state=ctx.rng_state,
-                        num_splits=1 if ctx.deterministic else 0,
+                        **fa_optional_backward_kwargs
                     )
                 elif i >= (cp_size-rank-1):
                     # [b*s, h, d] or [b*s//2, h, d]
@@ -689,7 +717,7 @@ class FlashAttnUnpaddedFuncWithCPSplitSeq_v0(torch.autograd.Function):
                         dout_, q_, k_, v_, out_, softmax_lse,
                         dq_, dk_, dv_, cu_seqlens_q, cu_seqlens_k//2, ctx.max_seqlen_q, ctx.max_seqlen_k//2,
                         ctx.dropout_p, ctx.softmax_scale, False, rng_state=ctx.rng_state,
-                        num_splits=1 if ctx.deterministic else 0,
+                        **fa_optional_backward_kwargs
                     )
                 else:
                     # [b*s, h, d] or [b*s//2, h, d]
@@ -699,7 +727,7 @@ class FlashAttnUnpaddedFuncWithCPSplitSeq_v0(torch.autograd.Function):
                         dout_, q_, k_, v_, out_, softmax_lse_[..., 1, :],
                         dq_, dk_, dv_, cu_seqlens_q//2, cu_seqlens_k, ctx.max_seqlen_q//2, ctx.max_seqlen_k,
                         ctx.dropout_p, ctx.softmax_scale, False, rng_state=ctx.rng_state,
-                        num_splits=1 if ctx.deterministic else 0,
+                        **fa_optional_backward_kwargs
                     )
 
                 if i >= (cp_size-rank-1):
@@ -781,18 +809,32 @@ class FlashAttnUnpaddedFuncWithCPSplitHead(torch.autograd.Function):
         q, k, v = [flash_attn_a2a_communicate(x, 2, 1, cp_group) for x in [q, k, v]]
         # [b*s*cp_size, h//cp_size, d]
         q, k, v = [x.view(-1, *x.shape[-2:]) for x in [q, k, v]]
-        # [b*s*cp_size, h//cp_size, d]
-        out_ = torch.empty_like(q)
 
-        _, softmax_lse, rng_state, _ = _flash_attn_forward(q, k, v, out_,
-                                                           cu_seqlens_q*cp_size,
-                                                           cu_seqlens_k*cp_size,
-                                                           max_seqlen_q*cp_size,
-                                                           max_seqlen_k*cp_size,
-                                                           dropout_p,
-                                                           softmax_scale,
-                                                           causal,
-                                                           return_softmax=False)
+        if _flash_attn_2_available:
+            assert(q.shape[-1] % 8 == 0), "hidden size per attention head should be multiple of 8"
+
+        if _flash_attn_2_available:
+            _, _, _, _, out_, softmax_lse, _, rng_state = _flash_attn_forward(q, k, v,
+                                                                              cu_seqlens_q*cp_size,
+                                                                              cu_seqlens_k*cp_size,
+                                                                              max_seqlen_q*cp_size,
+                                                                              max_seqlen_k*cp_size,
+                                                                              dropout_p,
+                                                                              softmax_scale,
+                                                                              causal,
+                                                                              return_softmax=False)
+        else:
+            # [b*s*cp_size, h//cp_size, d]
+            out_ = torch.empty_like(q)
+            _, softmax_lse, rng_state, _ = _flash_attn_forward(q, k, v, out_,
+                                                               cu_seqlens_q*cp_size,
+                                                               cu_seqlens_k*cp_size,
+                                                               max_seqlen_q*cp_size,
+                                                               max_seqlen_k*cp_size,
+                                                               dropout_p,
+                                                               softmax_scale,
+                                                               causal,
+                                                               return_softmax=False)
 
         # [b, s*cp_size, h//cp_size, d]
         out = out_.view(batch_size, out_.shape[0]//batch_size, *out_.shape[1:])
@@ -830,6 +872,10 @@ class FlashAttnUnpaddedFuncWithCPSplitHead(torch.autograd.Function):
         # [b*s*cp_size, h//cp_size, d]
         dq, dk, dv = [torch.empty_like(x) for x in [q, k, v]]
 
+        fa_optional_backward_kwargs = {}
+        if not _flash_attn_2_available:
+            fa_optional_backward_kwargs["num_splits"] = 1 if ctx.deterministic else 0
+
         _flash_attn_backward(dout, q, k, v, out, softmax_lse, dq, dk, dv,
                              cu_seqlens_q*cp_size,
                              cu_seqlens_k*cp_size,
@@ -839,7 +885,7 @@ class FlashAttnUnpaddedFuncWithCPSplitHead(torch.autograd.Function):
                              ctx.softmax_scale,
                              ctx.causal,
                              rng_state=ctx.rng_state,
-                             num_splits=1 if ctx.deterministic else 0)
+                             **fa_optional_backward_kwargs)
 
         # [b, s*cp_size, h//cp_size, d]
         dq, dk, dv = [x.view(batch_size, x.shape[0]//batch_size, *x.shape[1:]) for x in [dq, dk, dv]]
