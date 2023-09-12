@@ -1414,7 +1414,7 @@ class FlashAttention(torch.nn.Module):
                     cp_group, cp_global_ranks, cp_stream, cp_split_dim,
                     softmax_scale=1.0/self.norm_factor,
                     causal=attn_mask_type=="causal",
-                    deterministic=self.deterministic
+                    deterministic=self.deterministic,
                     cp_lossless_out=cp_lossless_out,
                     cp_lossless_lse=cp_lossless_lse,
                     cp_lossless_dqkv=cp_lossless_dqkv,
