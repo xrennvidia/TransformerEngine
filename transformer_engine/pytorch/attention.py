@@ -738,23 +738,16 @@ class FlashAttnUnpaddedFuncWithCPSplitSeq_v0(torch.autograd.Function):
                         **fa_optional_backward_kwargs
                     )
                 else:
-                    if _flash_attn_2_available:
-                        # [b, s, h, d] or [b, s//2, h, d]
-                        q_, k_, v_, out_, dout_ = [x.contiguous() for x in [q[:, 1, ...], k_, v_, out[:, 1, ...], dout[:, 1, ...]]]
-                        dq_, dk_, dv_ = [torch.empty_like(x) for x in [q_, k_, v_]]
+                    # [b*s, h, d] or [b*s//2, h, d]
+                    q_, k_, v_, out_, dout_ = [x.contiguous().view(-1, *x.shape[-2:]) for x in [q[:, 1, ...], k_, v_, out[:, 1, ...], dout[:, 1, ...]]]
+                    dq_, dk_, dv_ = [torch.empty_like(x) for x in [q_, k_, v_]]
 
+                    if _flash_attn_2_available:
                         _flash_attn_backward(
                             dout_, q_, k_, v_, out_, softmax_lse_[..., 1, :], dq_, dk_, dv_,
                             ctx.dropout_p, ctx.softmax_scale, False, rng_state=ctx.rng_state,
                         )
-
-                        # [b*s, h, d] or [b*s//2, h, d]
-                        dq_, dk_, dv_ = [x.view(-1, *x.shape[-2:]) for x in [dq_, dk_, dv_]]
                     else:
-                        # [b*s, h, d] or [b*s//2, h, d]
-                        q_, k_, v_, out_, dout_ = [x.contiguous().view(-1, *x.shape[-2:]) for x in [q[:, 1, ...], k_, v_, out[:, 1, ...], dout[:, 1, ...]]]
-                        dq_, dk_, dv_ = [torch.empty_like(x) for x in [q_, k_, v_]]
-
                         _flash_attn_backward(
                             dout_, q_, k_, v_, out_, softmax_lse_[..., 1, :],
                             dq_, dk_, dv_, cu_seqlens_q//2, cu_seqlens_k, ctx.max_seqlen_q//2, ctx.max_seqlen_k,
