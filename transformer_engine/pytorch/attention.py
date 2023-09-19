@@ -55,7 +55,8 @@ if _flash_attn_2_available:
     from flash_attn.flash_attn_interface import flash_attn_varlen_func as flash_attn_forward_func # pylint: disable=no-name-in-module
     from flash_attn_2_cuda import varlen_bwd as flash_attn_cuda_bwd # pylint: disable=no-name-in-module
     from flash_attn.flash_attn_interface import _flash_attn_varlen_forward as _flash_attn_forward
-    from flash_attn.flash_attn_interface import _flash_attn_varlen_backward as _flash_attn_backward
+    from flash_attn.flash_attn_interface import _flash_attn_backward
+    from flash_attn.flash_attn_interface import _flash_attn_varlen_backward
 else:
     from flash_attn.flash_attn_interface import flash_attn_unpadded_func as flash_attn_forward_func # pylint: disable=no-name-in-module,ungrouped-imports
     from flash_attn.flash_attn_interface import _flash_attn_forward, _flash_attn_backward
@@ -663,16 +664,21 @@ class FlashAttnUnpaddedFuncWithCPSplitSeq_v0(torch.autograd.Function):
             # [b*s*cp_size, h, d]
             dq, dk, dv = [torch.empty_like(x) for x in [q, k, v]]
 
-            _flash_attn_backward(dout, q, k, v, out, softmax_lse, dq, dk, dv,
-                                 cu_seqlens_q*cp_size,
-                                 cu_seqlens_k*cp_size,
-                                 ctx.max_seqlen_q*cp_size,
-                                 ctx.max_seqlen_k*cp_size,
-                                 ctx.dropout_p,
-                                 ctx.softmax_scale,
-                                 ctx.causal,
-                                 rng_state=ctx.rng_state,
-                                 **fa_optional_backward_kwargs)
+            if _flash_attn_2_available:
+                fa_bwd_func = _flash_attn_varlen_backward
+            else:
+                fa_bwd_func = _flash_attn_backward
+
+            fa_bwd_func(dout, q, k, v, out, softmax_lse, dq, dk, dv,
+                        cu_seqlens_q*cp_size,
+                        cu_seqlens_k*cp_size,
+                        ctx.max_seqlen_q*cp_size,
+                        ctx.max_seqlen_k*cp_size,
+                        ctx.dropout_p,
+                        ctx.softmax_scale,
+                        ctx.causal,
+                        rng_state=ctx.rng_state,
+                        **fa_optional_backward_kwargs)
 
             # [b, 2*cp_size, s//2, h, d]
             dq, dk, dv = [x.view(batch_size, 2*cp_size, x.shape[0]//(batch_size*2*cp_size), *x.shape[1:]) for x in [dq, dk, dv]]
@@ -703,7 +709,13 @@ class FlashAttnUnpaddedFuncWithCPSplitSeq_v0(torch.autograd.Function):
                     # [b*s, h, d]
                     q_, k_, v_, out_, dout_ = [x.contiguous().view(-1, *x.shape[-2:]) for x in [q, k_, v_, out, dout]]
                     dq_, dk_, dv_ = [torch.empty_like(x) for x in [q_, k_, v_]]
-                    _flash_attn_backward(
+
+                    if _flash_attn_2_available:
+                        fa_bwd_func = _flash_attn_varlen_backward
+                    else:
+                        fa_bwd_func = _flash_attn_backward
+
+                    fa_bwd_func(
                         dout_, q_, k_, v_, out_, softmax_lse,
                         dq_, dk_, dv_, cu_seqlens_q, cu_seqlens_k, ctx.max_seqlen_q, ctx.max_seqlen_k,
                         ctx.dropout_p, ctx.softmax_scale, True, rng_state=ctx.rng_state,
@@ -713,7 +725,13 @@ class FlashAttnUnpaddedFuncWithCPSplitSeq_v0(torch.autograd.Function):
                     # [b*s, h, d] or [b*s//2, h, d]
                     q_, k_, v_, out_, dout_ = [x.contiguous().view(-1, *x.shape[-2:]) for x in [q, k_[:, 0, ...], v_[:, 0, ...], out, dout]]
                     dq_, dk_, dv_ = [torch.empty_like(x) for x in [q_, k_, v_]]
-                    _flash_attn_backward(
+
+                    if _flash_attn_2_available:
+                        fa_bwd_func = _flash_attn_varlen_backward
+                    else:
+                        fa_bwd_func = _flash_attn_backward
+
+                    fa_bwd_func(
                         dout_, q_, k_, v_, out_, softmax_lse,
                         dq_, dk_, dv_, cu_seqlens_q, cu_seqlens_k//2, ctx.max_seqlen_q, ctx.max_seqlen_k//2,
                         ctx.dropout_p, ctx.softmax_scale, False, rng_state=ctx.rng_state,
@@ -723,12 +741,19 @@ class FlashAttnUnpaddedFuncWithCPSplitSeq_v0(torch.autograd.Function):
                     # [b*s, h, d] or [b*s//2, h, d]
                     q_, k_, v_, out_, dout_ = [x.contiguous().view(-1, *x.shape[-2:]) for x in [q[:, 1, ...], k_, v_, out[:, 1, ...], dout[:, 1, ...]]]
                     dq_, dk_, dv_ = [torch.empty_like(x) for x in [q_, k_, v_]]
-                    _flash_attn_backward(
-                        dout_, q_, k_, v_, out_, softmax_lse_[..., 1, :],
-                        dq_, dk_, dv_, cu_seqlens_q//2, cu_seqlens_k, ctx.max_seqlen_q//2, ctx.max_seqlen_k,
-                        ctx.dropout_p, ctx.softmax_scale, False, rng_state=ctx.rng_state,
-                        **fa_optional_backward_kwargs
-                    )
+
+                    if _flash_attn_2_available:
+                        _flash_attn_backward(
+                            dout_, q_, k_, v_, out_, softmax_lse_[..., 1, :], dq_, dk_, dv_,
+                            ctx.dropout_p, ctx.softmax_scale, False, rng_state=ctx.rng_state,
+                        )
+                    else:
+                        _flash_attn_backward(
+                            dout_, q_, k_, v_, out_, softmax_lse_[..., 1, :],
+                            dq_, dk_, dv_, cu_seqlens_q//2, cu_seqlens_k, ctx.max_seqlen_q//2, ctx.max_seqlen_k,
+                            ctx.dropout_p, ctx.softmax_scale, False, rng_state=ctx.rng_state,
+                            **fa_optional_backward_kwargs
+                        )
 
                 if i >= (cp_size-rank-1):
                     # [b, 2, s//2, h, d]
@@ -875,17 +900,20 @@ class FlashAttnUnpaddedFuncWithCPSplitHead(torch.autograd.Function):
         fa_optional_backward_kwargs = {}
         if not _flash_attn_2_available:
             fa_optional_backward_kwargs["num_splits"] = 1 if ctx.deterministic else 0
+            fa_bwd_func = _flash_attn_backward
+        else:
+            fa_bwd_func = _flash_attn_varlen_backward
 
-        _flash_attn_backward(dout, q, k, v, out, softmax_lse, dq, dk, dv,
-                             cu_seqlens_q*cp_size,
-                             cu_seqlens_k*cp_size,
-                             ctx.max_seqlen_q*cp_size,
-                             ctx.max_seqlen_k*cp_size,
-                             ctx.dropout_p,
-                             ctx.softmax_scale,
-                             ctx.causal,
-                             rng_state=ctx.rng_state,
-                             **fa_optional_backward_kwargs)
+        fa_bwd_func(dout, q, k, v, out, softmax_lse, dq, dk, dv,
+                    cu_seqlens_q*cp_size,
+                    cu_seqlens_k*cp_size,
+                    ctx.max_seqlen_q*cp_size,
+                    ctx.max_seqlen_k*cp_size,
+                    ctx.dropout_p,
+                    ctx.softmax_scale,
+                    ctx.causal,
+                    rng_state=ctx.rng_state,
+                    **fa_optional_backward_kwargs)
 
         # [b, s*cp_size, h//cp_size, d]
         dq, dk, dv = [x.view(batch_size, x.shape[0]//batch_size, *x.shape[1:]) for x in [dq, dk, dv]]
