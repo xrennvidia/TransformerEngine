@@ -3007,7 +3007,6 @@ class MultiheadAttention(torch.nn.Module):
                                                  cp_lossless_out,
                                                  cp_lossless_lse,
                                                  cp_lossless_dqkv)
-        )
 
     def forward(
         self,
