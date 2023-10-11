@@ -433,7 +433,7 @@ class TransformerLayer(torch.nn.Module):
             if hasattr(child, "set_tensor_parallel_group"):
                 child.set_tensor_parallel_group(tp_group)
 
-    def set_context_parallel_running(
+    def set_context_parallel_group(
         self,
         cp_group: Union[dist_group_type, None],
         cp_global_ranks: List[int],
@@ -443,16 +443,19 @@ class TransformerLayer(torch.nn.Module):
         cp_lossless_lse: bool = False,
         cp_lossless_dqkv: bool = False,
     ) -> None:
-        """Set CP group and CP dual-stream running"""
+        """Set CP group"""
         # Deep iterate but skip self to avoid infinite recursion.
         for index, child in enumerate(self.modules()):
             if index == 0:
                 continue
-            if hasattr(child, "set_context_parallel_running"):
-                child.set_context_parallel_running(cp_group, cp_global_ranks,
-                                                   cp_stream, cp_split_dim,
-                                                   cp_lossless_out, cp_lossless_lse,
-                                                   cp_lossless_dqkv)
+            if hasattr(child, "set_context_parallel_group"):
+                child.set_context_parallel_group(cp_group,
+                                                 cp_global_ranks,
+                                                 cp_stream,
+                                                 cp_split_dim,
+                                                 cp_lossless_out,
+                                                 cp_lossless_lse,
+                                                 cp_lossless_dqkv)
 
     def forward(
         self,

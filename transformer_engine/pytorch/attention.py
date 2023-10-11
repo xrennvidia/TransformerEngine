@@ -2322,6 +2322,25 @@ class DotProductAttention(torch.nn.Module):
 
         return hidden_states
 
+    def set_context_parallel_group(
+        self,
+        cp_group: Union[dist_group_type, None],
+        cp_global_ranks: List[int],
+        cp_stream: torch.cuda.Stream,
+        cp_split_dim: str = "sequence",
+        cp_lossless_out: bool = False,
+        cp_lossless_lse: bool = False,
+        cp_lossless_dqkv: bool = False,
+    ) -> None:
+        """Set CP group"""
+        self.cp_group = cp_group
+        self.cp_global_ranks = cp_global_ranks
+        self.cp_stream = cp_stream
+        self.cp_split_dim = cp_split_dim
+        self.cp_lossless_out = cp_lossless_out
+        self.cp_lossless_lse = cp_lossless_lse
+        self.cp_lossless_dqkv = cp_lossless_dqkv
+
     def forward(
         self,
         query_layer: torch.Tensor,
@@ -2965,7 +2984,7 @@ class MultiheadAttention(torch.nn.Module):
         """Set TP group"""
         self.tp_group = tp_group
 
-    def set_context_parallel_running(
+    def set_context_parallel_group(
         self,
         cp_group: Union[dist_group_type, None],
         cp_global_ranks: List[int],
@@ -2975,14 +2994,20 @@ class MultiheadAttention(torch.nn.Module):
         cp_lossless_lse: bool = False,
         cp_lossless_dqkv: bool = False,
     ) -> None:
-        """Set CP group and CP dual-stream running"""
-        self.core_attention.cp_group = cp_group
-        self.core_attention.cp_global_ranks = cp_global_ranks
-        self.core_attention.cp_stream = cp_stream
-        self.core_attention.cp_split_dim = cp_split_dim
-        self.core_attention.cp_lossless_out = cp_lossless_out
-        self.core_attention.cp_lossless_lse = cp_lossless_lse
-        self.core_attention.cp_lossless_dqkv = cp_lossless_dqkv
+        """Set CP group"""
+        # Deep iterate but skip self to avoid infinite recursion.
+        for index, child in enumerate(self.modules()):
+            if index == 0:
+                continue
+            if hasattr(child, "set_context_parallel_group"):
+                child.set_context_parallel_group(cp_group,
+                                                 cp_global_ranks,
+                                                 cp_stream,
+                                                 cp_slit_dim,
+                                                 cp_lossless_out,
+                                                 cp_lossless_lse,
+                                                 cp_lossless_dqkv)
+        )
 
     def forward(
         self,
