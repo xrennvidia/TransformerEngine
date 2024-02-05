@@ -2273,6 +2273,7 @@ class FusedAttnFunc_qkvpacked(torch.autograd.Function):
 
     @staticmethod
     def backward(ctx, d_out):
+        d_out = d_out.contiguous()
         qkv, out, cu_seqlens = ctx.saved_tensors
         if not ctx.aux_ctx_tensors[0].is_contiguous():
             ctx.aux_ctx_tensors[0] = ctx.aux_ctx_tensors[0].contiguous()
@@ -2342,6 +2343,7 @@ class FusedAttnFunc_kvpacked(torch.autograd.Function):
 
     @staticmethod
     def backward(ctx, d_out):
+        d_out = d_out.contiguous()
         q, kv, out, cu_seqlens_q, cu_seqlens_kv = ctx.saved_tensors
         if not ctx.aux_ctx_tensors[0].is_contiguous():
             ctx.aux_ctx_tensors[0] = ctx.aux_ctx_tensors[0].contiguous()
@@ -2423,6 +2425,7 @@ class FusedAttnFunc(torch.autograd.Function):
 
     @staticmethod
     def backward(ctx, d_out):
+        d_out = d_out.contiguous()
         q, k, v, out, cu_seqlens_q, cu_seqlens_kv = ctx.saved_tensors
         if not ctx.aux_ctx_tensors[0].is_contiguous():
             ctx.aux_ctx_tensors[0] = ctx.aux_ctx_tensors[0].contiguous()
