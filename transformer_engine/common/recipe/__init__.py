@@ -49,6 +49,17 @@ class _OverrideLinearPrecision(NamedTuple):
     wgrad: bool = False
 
 
+class _LiveAmax(NamedTuple):
+    """
+    Whether or not to calculate live amax for `weight`, `activation`,
+    and `dgrad` when using FP8.
+    """
+
+    weight: bool = False
+    activation: bool = False
+    dgrad: bool = False
+
+
 @dataclass()
 class DelayedScaling:
     """
@@ -124,6 +135,7 @@ class DelayedScaling:
     amax_history_len: int = 1024
     amax_compute_algo: Union[Literal["max", "most_recent"], Callable] = "max"
     override_linear_precision: _OverrideLinearPrecision = _OverrideLinearPrecision()
+    live_amax: _LiveAmax = _LiveAmax()
     scaling_factor_compute_algo: Optional[Callable] = None
     reduce_amax: bool = True
 
@@ -133,3 +145,7 @@ class DelayedScaling:
             (False, False, False),
             (False, False, True),
         ), "Only wgrad GEMM override is currently supported."
+        assert self.live_amax in (
+            (False, False, False),
+            (False, False, True),
+        ), "Only the live amax of dgrad is currently supported."

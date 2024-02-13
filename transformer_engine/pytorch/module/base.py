@@ -673,6 +673,12 @@ class TransformerEngineBaseModule(torch.nn.Module, ABC):
                 fp8_dtype_backward,
                 out=grad_output_c,
             )
+
+            if ctx.fp8_meta["recipe"].live_amax.dgrad:
+                grad_output_c_ = torch.empty_like(grad_output_c)
+                grad_output_c_.copy_(grad_output_c)
+                grad_output_c = grad_output_c_
+
             if not ub_overlap_ag:
                 grad_output_c, _ = gather_along_first_dim(grad_output_c, ctx.tp_group)
                 grad_output_t = tex.fp8_transpose(grad_output_c, fp8_dtype_backward)
@@ -707,6 +713,11 @@ class TransformerEngineBaseModule(torch.nn.Module, ABC):
                     fp8_dtype_backward,
                 )
             grad_bias = None
+
+        if ctx.fp8_meta["recipe"].live_amax.dgrad:
+            grad_output_c_ = torch.empty_like(grad_output_c)
+            grad_output_c_.copy_(grad_output_c)
+            grad_output_c = grad_output_c_
 
         return grad_output_mat, grad_output_c, grad_output_t, grad_bias
 
