@@ -1539,6 +1539,7 @@ class FlashAttnUnpaddedFuncWithCPSplitSeq_v0(torch.autograd.Function):
             softmax_lse_ = softmax_lse.index_select(-2, idx)
             # [b, h, s]
             softmax_lse = softmax_lse_.view(*softmax_lse_.shape[:-2], -1)
+            softmax_lse_ = softmax_lse_[..., 1, :].contiguous()
             # [b, 2, s//2, h, d] or [b, 2*cp_size, s//2, h, d]
             dq, dk, dv = [torch.empty_like(x) for x in [q, k, v]]
             # [b, 2, s//2, h, d]
@@ -1573,7 +1574,7 @@ class FlashAttnUnpaddedFuncWithCPSplitSeq_v0(torch.autograd.Function):
                     q_, k_, v_, out_, dout_ = [x.contiguous().view(-1, *x.shape[-2:]) for x in [q[:, 1, ...], k_, v_, out[:, 1, ...], dout[:, 1, ...]]]
                     dq_, dk_, dv_ = [torch.empty_like(x) for x in [q_, k_, v_]]
                     _flash_attn_backward(
-                        dout_, q_, k_, v_, out_, softmax_lse_[..., 1, :],
+                        dout_, q_, k_, v_, out_, softmax_lse_,
                         dq_, dk_, dv_, cu_seqlens_q//2, cu_seqlens_k, ctx.max_seqlen_q//2, ctx.max_seqlen_k,
                         ctx.dropout_p, ctx.softmax_scale, False, rng_state=ctx.rng_state,
                         **fa_optional_backward_kwargs
