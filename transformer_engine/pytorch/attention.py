@@ -3051,7 +3051,7 @@ class FlashAttention(torch.nn.Module):
                     cp_global_ranks,
                     cp_stream,
                     cp_split_dim,
-                    softmax_scale=1.0/self.norm_factor,
+                    softmax_scale=self.softmax_scale,
                     qkv_format="bshd" if qkv_format == "sbhd" else qkv_format,
                     attn_mask_type=attn_mask_type,
                     deterministic=self.deterministic,
