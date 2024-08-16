@@ -487,6 +487,7 @@ class TransformerLayer(torch.nn.Module):
         cp_group: Union[dist_group_type, None],
         cp_global_ranks: List[int],
         cp_stream: torch.cuda.Stream,
+        cp_comm_type: str = "p2p",
         cp_split_dim: str = "sequence",
         cp_lossless_out: bool = False,
         cp_lossless_lse: bool = False,
@@ -504,6 +505,9 @@ class TransformerLayer(torch.nn.Module):
                          list of global ranks in the context group.
         cp_stream : torch.cuda.Stream
                    cuda stream for context parallel execution.
+        cp_comm_type : str
+                      inter-gpu communication type for context parallelism.
+                      Can be "p2p" or "all_gather".
         """
         # Deep iterate but skip self to avoid infinite recursion.
         for index, child in enumerate(self.modules()):
@@ -513,6 +517,7 @@ class TransformerLayer(torch.nn.Module):
                 child.set_context_parallel_group(cp_group,
                                                  cp_global_ranks,
                                                  cp_stream,
+                                                 cp_comm_type,
                                                  cp_split_dim,
                                                  cp_lossless_out,
                                                  cp_lossless_lse,
@@ -662,7 +667,7 @@ class TransformerLayer(torch.nn.Module):
             hidden_states,
             attention_mask=attention_mask,
             attn_mask_type=self_attn_mask_type,
-            window_size=enc_dec_window_size,
+            window_size=window_size,
             inference_params=inference_params,
             is_first_microbatch=is_first_microbatch,
             checkpoint_core_attention=checkpoint_core_attention,
@@ -689,6 +694,8 @@ class TransformerLayer(torch.nn.Module):
             inter_attention_outputs = self.inter_attention(
                 hidden_states,
                 attention_mask=enc_dec_attn_mask,
+                attn_mask_type=enc_dec_attn_mask_type,
+                window_size=enc_dec_window_size,
                 encoder_output=encoder_output,
                 is_first_microbatch=is_first_microbatch,
                 checkpoint_core_attention=checkpoint_core_attention,
