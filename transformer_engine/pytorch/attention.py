@@ -3410,6 +3410,18 @@ class AttnFuncWithCPAndQKVOA2A(torch.autograd.Function):
         q, k, v = [x.view(*x.shape[:seq_dim], -1, *x.shape[(seq_dim+2):]) for x in [q, k, v]]
 
         if use_fused_attention:
+            if fp8 and get_distributed_rank(cp_group) == 0:
+                rank = get_distributed_rank(cp_group)
+                qkv_scale_inv = fp8_meta_kwargs["d_scale_qkv"]
+                s_scale_inv = fp8_meta_kwargs["d_scale_s"]
+                s_scale = fp8_meta_kwargs["q_scale_s"]
+                o_scale = fp8_meta_kwargs["q_scale_o"]
+                amax_s = fp8_meta_kwargs["amax_s"]
+                amax_o = fp8_meta_kwargs["amax_o"]
+                print(f"cp={cp_size} rank_{rank} fwd {qkv_scale_inv} {s_scale_inv} {s_scale} {o_scale} {amax_s} {amax_o}")
+                print(f"cp={cp_size} rank_{rank} fwd {max_seqlen_q} {max_seqlen_kv} {cu_seqlens_q} {cu_seqlens_kv} {cu_seqlens_q_padded} {cu_seqlens_kv_padded}")
+                print(f"cp={cp_size} rank_{rank} fwd {fused_attn_qkv_dtype} {softmax_scale} {dropout_p} {qkv_layout}")
+                print(f"cp={cp_size} rank_{rank} fwd {attn_bias_type} {attn_mask_type} {attn_bias} {window_size}")
             out, aux_ctx_tensors = fused_attn_fwd(
                 is_training,
                 max_seqlen_q,
@@ -3432,6 +3444,7 @@ class AttnFuncWithCPAndQKVOA2A(torch.autograd.Function):
                 window_size=window_size,
                 **fp8_meta_kwargs,
             )
+            attn_out = out
             if fp8:
                 softmax_lse, _, rng_state = aux_ctx_tensors
             else:
@@ -3566,10 +3579,10 @@ class AttnFuncWithCPAndQKVOA2A(torch.autograd.Function):
         ctx.use_fused_attention = use_fused_attention
         ctx.fp8 = fp8 and int(os.getenv("NVTE_FP8_DPA_BWD", "1"))
         ctx.fp8_meta = fp8_meta
-        return out_ret
+        return out_ret, softmax_lse, q, k, v, attn_out
 
     @staticmethod
-    def backward(ctx, dout):
+    def backward(ctx, dout, *args):
         cp_size = get_distributed_world_size(ctx.cp_group)
 
         q, k, v, out, softmax_lse, rng_state = ctx.saved_tensors[:6]
@@ -3582,9 +3595,9 @@ class AttnFuncWithCPAndQKVOA2A(torch.autograd.Function):
 
         if ctx.fp8:
             if ctx.use_fused_attention:
-                fp8_dtype_forkward = get_fp8_te_dtype(ctx.fp8_meta["recipe"], fprop_tensor=True)
+                fp8_dtype_forward = get_fp8_te_dtype(ctx.fp8_meta["recipe"], fprop_tensor=True)
                 fp8_dtype_backward = get_fp8_te_dtype(ctx.fp8_meta["recipe"], fprop_tensor=False)
-                fused_attn_qkv_dtype = fp8_dtype_forkward
+                fused_attn_qkv_dtype = fp8_dtype_forward
                 fused_attn_dqkv_dtype = fp8_dtype_backward
                 fused_attn_backend = FusedAttnBackend["FP8"]
                 if ctx.fp8_meta["recipe"].fp8_mha:
@@ -3623,6 +3636,7 @@ class AttnFuncWithCPAndQKVOA2A(torch.autograd.Function):
         if not ctx.use_fused_attention:
             out = out.view(ctx.batch_size, -1, *out.shape[-2:])
         dout = dout.view(*out.shape)
+        print(out.shape, dout.shape)
 
         # [b, s, np, hn] -> [b, s, cp, np//cp, hn] or [s, b, np, hn] -> [s, b, cp, np//cp, hn]
         out, dout = [x.view(*x.shape[:-2], cp_size, x.shape[-2] // cp_size, x.shape[-1]) for x in [out, dout]]
@@ -3656,6 +3670,19 @@ class AttnFuncWithCPAndQKVOA2A(torch.autograd.Function):
         if ctx.use_fused_attention:
             if ctx.fp8:
                 aux_ctx_tensors = [softmax_lse, softmax_lse, rng_state]
+                if get_distributed_rank(ctx.cp_group) == 0:
+                    rank = get_distributed_rank(ctx.cp_group)
+                    d_scale_qkv = fp8_meta_kwargs["d_scale_qkv"]
+                    d_scale_s = fp8_meta_kwargs["d_scale_s"]
+                    d_scale_o = fp8_meta_kwargs["d_scale_o"]
+                    d_scale_do = fp8_meta_kwargs["d_scale_do"]
+                    d_scale_dp = fp8_meta_kwargs["d_scale_dp"]
+                    q_scale_s = fp8_meta_kwargs["q_scale_s"]
+                    q_scale_dp = fp8_meta_kwargs["q_scale_dp"]
+                    q_scale_dqkv = fp8_meta_kwargs["q_scale_dqkv"]
+                    amax_dp = fp8_meta_kwargs["amax_dp"]
+                    amax_dqkv = fp8_meta_kwargs["amax_dqkv"]
+                    print(f"cp={cp_size} rank_{rank} bwd {d_scale_qkv} {d_scale_s} {d_scale_o} {d_scale_do} {d_scale_dp} {q_scale_s} {q_scale_dp} {q_scale_dqkv} {amax_dp} {amax_dqkv}")
             else:
                 aux_ctx_tensors = [softmax_lse, rng_state]
             dq, dk, dv, _ = fused_attn_bwd(
@@ -5770,6 +5797,18 @@ class FusedAttnFunc(torch.autograd.Function):
                     v_fp8 = cast_to_fp8(
                         v, fp8_meta["scaling_fwd"], META_QKV, fp8_dtype_forward
                     ).view(v.shape)
+            if get_distributed_rank() == 0:
+                rank = get_distributed_rank()
+                qkv_scale_inv = fp8_meta["scaling_fwd"].scale_inv[META_QKV]
+                s_scale_inv = fp8_meta["scaling_fwd"].scale_inv[META_S]
+                s_scale = fp8_meta["scaling_fwd"].scale[META_S]
+                o_scale = fp8_meta["scaling_fwd"].scale[META_O]
+                amax_s = fp8_meta["scaling_fwd"].amax_history[0][META_S]
+                amax_o = fp8_meta["scaling_fwd"].amax_history[0][META_O]
+                print(f"cp=1 rank_{rank} {qkv_scale_inv} {s_scale_inv} {s_scale} {o_scale} {amax_s} {amax_o}")
+                print(f"cp=1 rank_{rank} {max_seqlen_q} {max_seqlen_kv} {cu_seqlens_q} {cu_seqlens_kv} {cu_seqlens_q_padded} {cu_seqlens_kv_padded}")
+                print(f"cp=1 rank_{rank} {fp8_dtype_forward} {attn_scale} {dropout_p} {qkv_layout}")
+                print(f"cp=1 rank_{rank} {attn_bias_type} {attn_mask_type} {attn_bias} {window_size} {fast_zero_fill} {rng_gen}")
             out_fp8, aux_ctx_tensors = fused_attn_fwd(
                 is_training,
                 max_seqlen_q,
@@ -5962,10 +6001,20 @@ class FusedAttnFunc(torch.autograd.Function):
         ctx.use_FAv2_bwd = use_FAv2_bwd
         ctx.deterministic = deterministic
 
-        return out_ret
+        h = out_ret.shape[-2] // 2
+        if fp8:
+            if get_distributed_rank() == 0:
+                return out_ret, aux_ctx_tensors[0][:, :h], q_fp8[..., :h, :], k_fp8[..., :h, :], v_fp8[..., :h, :], out_fp8[..., :h, :]
+            else:
+                return out_ret, aux_ctx_tensors[0][:, h:], q_fp8[..., h:, :], k_fp8[..., h:, :], v_fp8[..., h:, :], out_fp8[..., h:, :]
+        else:
+            if get_distributed_rank() == 0:
+                return out_ret, aux_ctx_tensors[0][:, :h], q[..., :h, :], k[..., :h, :], v[..., :h, :], out_ret[..., :h, :]
+            else:
+                return out_ret, aux_ctx_tensors[0][:, h:], q[..., h:, :], k[..., h:, :], v[..., h:, :], out_ret[..., h:, :]
 
     @staticmethod
-    def backward(ctx, d_out):
+    def backward(ctx, d_out, *args):
         if ctx.fp8_meta["recipe"].fp8_mha:
             assert isinstance(
                 d_out, Float8Tensor
@@ -6041,6 +6090,19 @@ class FusedAttnFunc(torch.autograd.Function):
                             META_DO,
                             fp8_dtype_backward,
                         ).view(d_out.shape)
+                    if get_distributed_rank() == 0:
+                        rank = get_distributed_rank()
+                        d_scale_qkv = fwd_scale_invs[META_QKV]
+                        d_scale_s = fwd_scale_invs[META_S]
+                        d_scale_o = fwd_scale_invs[META_O]
+                        d_scale_do = ctx.fp8_meta["scaling_bwd"].scale_inv[META_DO]
+                        d_scale_dp = ctx.fp8_meta["scaling_bwd"].scale_inv[META_DP]
+                        q_scale_s = fwd_scales[META_S]
+                        q_scale_dp = ctx.fp8_meta["scaling_bwd"].scale[META_DP]
+                        q_scale_dqkv = ctx.fp8_meta["scaling_bwd"].scale[META_DQKV]
+                        amax_dp = ctx.fp8_meta["scaling_bwd"].amax_history[0][META_DP]
+                        amax_dqkv = ctx.fp8_meta["scaling_bwd"].amax_history[0][META_DQKV]
+                        print(f"cp=1 rank_{rank} bwd {d_scale_qkv} {d_scale_s} {d_scale_o} {d_scale_do} {d_scale_dp} {q_scale_s} {q_scale_dp} {q_scale_dqkv} {amax_dp} {amax_dqkv}")
                     dq_fp8, dk_fp8, dv_fp8, *rest = fused_attn_bwd(
                         ctx.max_seqlen_q,
                         ctx.max_seqlen_kv,
@@ -6468,7 +6530,7 @@ class FusedAttention(torch.nn.Module):
                 x.contiguous() for x in (query_layer, key_layer, value_layer)
             ]
             with self.attention_dropout_ctx():
-                output = attn_forward_func_with_cp(
+                output, *rest = attn_forward_func_with_cp(
                     self.training,
                     query_layer,
                     key_layer,
@@ -6497,7 +6559,7 @@ class FusedAttention(torch.nn.Module):
                 )
         else:
             with self.attention_dropout_ctx():
-                output = FusedAttnFunc.apply(
+                output, *rest = FusedAttnFunc.apply(
                     self.training,
                     max_seqlen_q,
                     max_seqlen_kv,
@@ -6526,7 +6588,9 @@ class FusedAttention(torch.nn.Module):
                 )
 
         # ...hd -> ...(hd)
-        return output.view(*output.shape[:-2], -1)
+        for i, debug_tensor in enumerate(rest):
+            rest[i] = debug_tensor.view(*debug_tensor.shape[:-2], -1)
+        return output.view(*output.shape[:-2], -1), rest
 
 
 class DotProductAttention(TransformerEngineBaseModule):
