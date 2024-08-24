@@ -3185,6 +3185,7 @@ class AttnFuncWithCPAndKVAllGather(torch.autograd.Function):
                             attn_mask_type=ctx.attn_mask_type,
                             attn_bias_type=ctx.attn_bias_type,
                             window_size=ctx.window_size,
+                            deterministic=ctx.deterministic,
                         )
                     else:
                         q_, k_, v_ = [x.view(-1, *x.shape[-2:]) for x in [q_, k_, v_]]
@@ -3445,10 +3446,6 @@ class AttnFuncWithCPAndQKVOA2A(torch.autograd.Function):
                 **fp8_meta_kwargs,
             )
             attn_out = out
-            if fp8:
-                softmax_lse, _, rng_state = aux_ctx_tensors
-            else:
-                softmax_lse, rng_state = aux_ctx_tensors
         else:
             ctx.batch_size = q.shape[0]
             # [b, cp*s, np//cp, hn] -> [b*cp*s, np//cp, hn]
@@ -3476,6 +3473,7 @@ class AttnFuncWithCPAndQKVOA2A(torch.autograd.Function):
                 return_softmax=False,
                 **fa_optional_forward_kwargs,
             )
+            aux_ctx_tensors = [softmax_lse, rng_state]
             # [b*cp*s, np//cp, hn] -> [b, cp*s, np//cp, hn]
             out = out.view(ctx.batch_size, -1, *out.shape[-2:])
 
@@ -3557,14 +3555,13 @@ class AttnFuncWithCPAndQKVOA2A(torch.autograd.Function):
             k_save,
             v_save,
             out_save,
-            softmax_lse,
-            rng_state,
             cu_seqlens_q,
             cu_seqlens_kv,
             cu_seqlens_q_padded,
             cu_seqlens_kv_padded,
             fp8_fwd_scales,
             fp8_fwd_scale_invs,
+            *aux_ctx_tensors,
         )
         ctx.cp_group = cp_group
         ctx.dropout_p = dropout_p
@@ -3579,15 +3576,16 @@ class AttnFuncWithCPAndQKVOA2A(torch.autograd.Function):
         ctx.use_fused_attention = use_fused_attention
         ctx.fp8 = fp8 and int(os.getenv("NVTE_FP8_DPA_BWD", "1"))
         ctx.fp8_meta = fp8_meta
-        return out_ret, softmax_lse, q, k, v, attn_out
+        return out_ret, aux_ctx_tensors[0], q, k, v, attn_out
 
     @staticmethod
     def backward(ctx, dout, *args):
         cp_size = get_distributed_world_size(ctx.cp_group)
 
-        q, k, v, out, softmax_lse, rng_state = ctx.saved_tensors[:6]
-        cu_seqlens_q, cu_seqlens_kv, cu_seqlens_q_padded, cu_seqlens_kv_padded = ctx.saved_tensors[6:10]
-        fp8_fwd_scales, fp8_fwd_scale_invs = ctx.saved_tensors[10:12]
+        q, k, v, out = ctx.saved_tensors[:4]
+        cu_seqlens_q, cu_seqlens_kv, cu_seqlens_q_padded, cu_seqlens_kv_padded = ctx.saved_tensors[4:8]
+        fp8_fwd_scales, fp8_fwd_scale_invs = ctx.saved_tensors[8:10]
+        aux_ctx_tensors = ctx.saved_tensors[10:]
 
         qkv_layout = ctx.qkv_format + "_" + ctx.qkv_format + "_" + ctx.qkv_format
         causal = "causal" in ctx.attn_mask_type
@@ -3669,7 +3667,6 @@ class AttnFuncWithCPAndQKVOA2A(torch.autograd.Function):
 
         if ctx.use_fused_attention:
             if ctx.fp8:
-                aux_ctx_tensors = [softmax_lse, softmax_lse, rng_state]
                 if get_distributed_rank(ctx.cp_group) == 0:
                     rank = get_distributed_rank(ctx.cp_group)
                     d_scale_qkv = fp8_meta_kwargs["d_scale_qkv"]
@@ -3683,8 +3680,6 @@ class AttnFuncWithCPAndQKVOA2A(torch.autograd.Function):
                     amax_dp = fp8_meta_kwargs["amax_dp"]
                     amax_dqkv = fp8_meta_kwargs["amax_dqkv"]
                     print(f"cp={cp_size} rank_{rank} bwd {d_scale_qkv} {d_scale_s} {d_scale_o} {d_scale_do} {d_scale_dp} {q_scale_s} {q_scale_dp} {q_scale_dqkv} {amax_dp} {amax_dqkv}")
-            else:
-                aux_ctx_tensors = [softmax_lse, rng_state]
             dq, dk, dv, _ = fused_attn_bwd(
                 ctx.max_seqlen_q,
                 ctx.max_seqlen_kv,
@@ -3707,9 +3702,11 @@ class AttnFuncWithCPAndQKVOA2A(torch.autograd.Function):
                 attn_mask_type=ctx.attn_mask_type,
                 attn_bias_type=ctx.attn_bias_type,
                 window_size=ctx.window_size,
+                deterministic=ctx.deterministic,
                 **fp8_meta_kwargs,
             )
         else:
+            softmax_lse, rng_state = aux_ctx_tensors
             out, dout = [x.view(-1, *x.shape[-2:]) for x in [out, dout]]
             dq, dk, dv = [torch.empty_like(x) for x in [q, k, v]]
             _flash_attn_backward(
