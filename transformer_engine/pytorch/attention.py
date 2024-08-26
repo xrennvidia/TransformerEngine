@@ -3751,20 +3751,20 @@ class AttnFuncWithCPAndQKVOA2A(torch.autograd.Function):
             fa_optional_backward_kwargs["deterministic"] = ctx.deterministic
 
         if ctx.use_fused_attention:
-            if ctx.fp8:
-                #if get_distributed_rank(ctx.cp_group) == 0:
-                #    rank = get_distributed_rank(ctx.cp_group)
-                #    d_scale_qkv = fp8_meta_kwargs["d_scale_qkv"]
-                #    d_scale_s = fp8_meta_kwargs["d_scale_s"]
-                #    d_scale_o = fp8_meta_kwargs["d_scale_o"]
-                #    d_scale_do = fp8_meta_kwargs["d_scale_do"]
-                #    d_scale_dp = fp8_meta_kwargs["d_scale_dp"]
-                #    q_scale_s = fp8_meta_kwargs["q_scale_s"]
-                #    q_scale_dp = fp8_meta_kwargs["q_scale_dp"]
-                #    q_scale_dqkv = fp8_meta_kwargs["q_scale_dqkv"]
-                #    amax_dp = fp8_meta_kwargs["amax_dp"]
-                #    amax_dqkv = fp8_meta_kwargs["amax_dqkv"]
-                #    print(f"cp={cp_size} rank_{rank} bwd {d_scale_qkv} {d_scale_s} {d_scale_o} {d_scale_do} {d_scale_dp} {q_scale_s} {q_scale_dp} {q_scale_dqkv} {amax_dp} {amax_dqkv}")
+            #if ctx.fp8:
+            #    if get_distributed_rank(ctx.cp_group) == 0:
+            #        rank = get_distributed_rank(ctx.cp_group)
+            #        d_scale_qkv = fp8_meta_kwargs["d_scale_qkv"]
+            #        d_scale_s = fp8_meta_kwargs["d_scale_s"]
+            #        d_scale_o = fp8_meta_kwargs["d_scale_o"]
+            #        d_scale_do = fp8_meta_kwargs["d_scale_do"]
+            #        d_scale_dp = fp8_meta_kwargs["d_scale_dp"]
+            #        q_scale_s = fp8_meta_kwargs["q_scale_s"]
+            #        q_scale_dp = fp8_meta_kwargs["q_scale_dp"]
+            #        q_scale_dqkv = fp8_meta_kwargs["q_scale_dqkv"]
+            #        amax_dp = fp8_meta_kwargs["amax_dp"]
+            #        amax_dqkv = fp8_meta_kwargs["amax_dqkv"]
+            #        print(f"cp={cp_size} rank_{rank} bwd {d_scale_qkv} {d_scale_s} {d_scale_o} {d_scale_do} {d_scale_dp} {q_scale_s} {q_scale_dp} {q_scale_dqkv} {amax_dp} {amax_dqkv}")
             dq, dk, dv, _ = fused_attn_bwd(
                 ctx.max_seqlen_q,
                 ctx.max_seqlen_kv,
