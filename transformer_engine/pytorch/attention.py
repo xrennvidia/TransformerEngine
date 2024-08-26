@@ -3720,7 +3720,6 @@ class AttnFuncWithCPAndQKVOA2A(torch.autograd.Function):
         if not ctx.use_fused_attention:
             out = out.view(ctx.batch_size, -1, *out.shape[-2:])
         dout = dout.view(*out.shape)
-        print(out.shape, dout.shape)
 
         # [b, s, np, hn] -> [b, s, cp, np//cp, hn] or [s, b, np, hn] -> [s, b, cp, np//cp, hn]
         out, dout = [x.view(*x.shape[:-2], cp_size, x.shape[-2] // cp_size, x.shape[-1]) for x in [out, dout]]
@@ -3753,19 +3752,19 @@ class AttnFuncWithCPAndQKVOA2A(torch.autograd.Function):
 
         if ctx.use_fused_attention:
             if ctx.fp8:
-                if get_distributed_rank(ctx.cp_group) == 0:
-                    rank = get_distributed_rank(ctx.cp_group)
-                    d_scale_qkv = fp8_meta_kwargs["d_scale_qkv"]
-                    d_scale_s = fp8_meta_kwargs["d_scale_s"]
-                    d_scale_o = fp8_meta_kwargs["d_scale_o"]
-                    d_scale_do = fp8_meta_kwargs["d_scale_do"]
-                    d_scale_dp = fp8_meta_kwargs["d_scale_dp"]
-                    q_scale_s = fp8_meta_kwargs["q_scale_s"]
-                    q_scale_dp = fp8_meta_kwargs["q_scale_dp"]
-                    q_scale_dqkv = fp8_meta_kwargs["q_scale_dqkv"]
-                    amax_dp = fp8_meta_kwargs["amax_dp"]
-                    amax_dqkv = fp8_meta_kwargs["amax_dqkv"]
-                    print(f"cp={cp_size} rank_{rank} bwd {d_scale_qkv} {d_scale_s} {d_scale_o} {d_scale_do} {d_scale_dp} {q_scale_s} {q_scale_dp} {q_scale_dqkv} {amax_dp} {amax_dqkv}")
+                #if get_distributed_rank(ctx.cp_group) == 0:
+                #    rank = get_distributed_rank(ctx.cp_group)
+                #    d_scale_qkv = fp8_meta_kwargs["d_scale_qkv"]
+                #    d_scale_s = fp8_meta_kwargs["d_scale_s"]
+                #    d_scale_o = fp8_meta_kwargs["d_scale_o"]
+                #    d_scale_do = fp8_meta_kwargs["d_scale_do"]
+                #    d_scale_dp = fp8_meta_kwargs["d_scale_dp"]
+                #    q_scale_s = fp8_meta_kwargs["q_scale_s"]
+                #    q_scale_dp = fp8_meta_kwargs["q_scale_dp"]
+                #    q_scale_dqkv = fp8_meta_kwargs["q_scale_dqkv"]
+                #    amax_dp = fp8_meta_kwargs["amax_dp"]
+                #    amax_dqkv = fp8_meta_kwargs["amax_dqkv"]
+                #    print(f"cp={cp_size} rank_{rank} bwd {d_scale_qkv} {d_scale_s} {d_scale_o} {d_scale_do} {d_scale_dp} {q_scale_s} {q_scale_dp} {q_scale_dqkv} {amax_dp} {amax_dqkv}")
             dq, dk, dv, _ = fused_attn_bwd(
                 ctx.max_seqlen_q,
                 ctx.max_seqlen_kv,
@@ -5962,10 +5961,10 @@ class FusedAttnFunc(torch.autograd.Function):
                 o_scale = fp8_meta["scaling_fwd"].scale[META_O]
                 amax_s = fp8_meta["scaling_fwd"].amax_history[0][META_S]
                 amax_o = fp8_meta["scaling_fwd"].amax_history[0][META_O]
-                print(f"cp=1 rank_{rank} {qkv_scale_inv} {s_scale_inv} {s_scale} {o_scale} {amax_s} {amax_o}")
-                print(f"cp=1 rank_{rank} {max_seqlen_q} {max_seqlen_kv} {cu_seqlens_q} {cu_seqlens_kv} {cu_seqlens_q_padded} {cu_seqlens_kv_padded}")
-                print(f"cp=1 rank_{rank} {fp8_dtype_forward} {attn_scale} {dropout_p} {qkv_layout}")
-                print(f"cp=1 rank_{rank} {attn_bias_type} {attn_mask_type} {attn_bias} {window_size} {fast_zero_fill} {rng_gen}")
+                print(f"cp=1 rank_{rank} fwd {qkv_scale_inv} {s_scale_inv} {s_scale} {o_scale} {amax_s} {amax_o}")
+                print(f"cp=1 rank_{rank} fwd {max_seqlen_q} {max_seqlen_kv} {cu_seqlens_q} {cu_seqlens_kv} {cu_seqlens_q_padded} {cu_seqlens_kv_padded}")
+                print(f"cp=1 rank_{rank} fwd {fp8_dtype_forward} {attn_scale} {dropout_p} {qkv_layout}")
+                print(f"cp=1 rank_{rank} fwd {attn_bias_type} {attn_mask_type} {attn_bias} {window_size} {fast_zero_fill} {rng_gen}")
             out_fp8, aux_ctx_tensors = fused_attn_fwd(
                 is_training,
                 max_seqlen_q,
@@ -6247,19 +6246,19 @@ class FusedAttnFunc(torch.autograd.Function):
                             META_DO,
                             fp8_dtype_backward,
                         ).view(d_out.shape)
-                    if get_distributed_rank() == 0:
-                        rank = get_distributed_rank()
-                        d_scale_qkv = fwd_scale_invs[META_QKV]
-                        d_scale_s = fwd_scale_invs[META_S]
-                        d_scale_o = fwd_scale_invs[META_O]
-                        d_scale_do = ctx.fp8_meta["scaling_bwd"].scale_inv[META_DO]
-                        d_scale_dp = ctx.fp8_meta["scaling_bwd"].scale_inv[META_DP]
-                        q_scale_s = fwd_scales[META_S]
-                        q_scale_dp = ctx.fp8_meta["scaling_bwd"].scale[META_DP]
-                        q_scale_dqkv = ctx.fp8_meta["scaling_bwd"].scale[META_DQKV]
-                        amax_dp = ctx.fp8_meta["scaling_bwd"].amax_history[0][META_DP]
-                        amax_dqkv = ctx.fp8_meta["scaling_bwd"].amax_history[0][META_DQKV]
-                        print(f"cp=1 rank_{rank} bwd {d_scale_qkv} {d_scale_s} {d_scale_o} {d_scale_do} {d_scale_dp} {q_scale_s} {q_scale_dp} {q_scale_dqkv} {amax_dp} {amax_dqkv}")
+                    #if get_distributed_rank() == 0:
+                    #    rank = get_distributed_rank()
+                    #    d_scale_qkv = fwd_scale_invs[META_QKV]
+                    #    d_scale_s = fwd_scale_invs[META_S]
+                    #    d_scale_o = fwd_scale_invs[META_O]
+                    #    d_scale_do = ctx.fp8_meta["scaling_bwd"].scale_inv[META_DO]
+                    #    d_scale_dp = ctx.fp8_meta["scaling_bwd"].scale_inv[META_DP]
+                    #    q_scale_s = fwd_scales[META_S]
+                    #    q_scale_dp = ctx.fp8_meta["scaling_bwd"].scale[META_DP]
+                    #    q_scale_dqkv = ctx.fp8_meta["scaling_bwd"].scale[META_DQKV]
+                    #    amax_dp = ctx.fp8_meta["scaling_bwd"].amax_history[0][META_DP]
+                    #    amax_dqkv = ctx.fp8_meta["scaling_bwd"].amax_history[0][META_DQKV]
+                    #    print(f"cp=1 rank_{rank} bwd {d_scale_qkv} {d_scale_s} {d_scale_o} {d_scale_do} {d_scale_dp} {q_scale_s} {q_scale_dp} {q_scale_dqkv} {amax_dp} {amax_dqkv}")
                     dq_fp8, dk_fp8, dv_fp8, *rest = fused_attn_bwd(
                         ctx.max_seqlen_q,
                         ctx.max_seqlen_kv,
