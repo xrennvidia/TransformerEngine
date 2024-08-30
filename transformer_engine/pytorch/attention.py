@@ -74,6 +74,9 @@ from transformer_engine.pytorch.jit import jit_fuser, no_torch_dynamo
 from transformer_engine.pytorch.graph import is_graph_capturing
 
 
+_NVTE_FLASH_ATTN = int(os.getenv("NVTE_FLASH_ATTN", "1"))
+_NVTE_FUSED_ATTN = int(os.getenv("NVTE_FUSED_ATTN", "1"))
+_NVTE_UNFUSED_ATTN = int(os.getenv("NVTE_UNFUSED_ATTN", "1"))
 _flash_attn_version = PkgVersion(get_pkg_version("flash-attn"))
 _flash_attn_version_required = PkgVersion("2.0.6")
 _flash_attn_max_version = PkgVersion("2.6.3")
@@ -89,13 +92,14 @@ try:
     _flash_attn_v3_version = PkgVersion(get_pkg_version("flashattn-hopper"))
     _flash_attn_3_plus = _flash_attn_v3_version >= PkgVersion("2.6.1")
 except PackageNotFoundError:
-    warnings.warn(
-        "To use flash-attn v3, please use the following commands to install: \n"
-        """(1) pip install "git+https://github.com/Dao-AILab/flash-attention.git#egg=flashattn-hopper&subdirectory=hopper" \n"""
-        """(2) python_path=`python -c "import site; print(site.getsitepackages()[0])"` \n"""
-        """(3) mkdir -p $python_path/flashattn_hopper \n"""
-        """(4) wget -P $python_path/flashattn_hopper https://raw.githubusercontent.com/Dao-AILab/flash-attention/main/hopper/flash_attn_interface.py"""
-    )
+    if get_device_compute_capability() == (9, 0) and _NVTE_FLASH_ATTN:
+        warnings.warn(
+            "To use flash-attn v3, please use the following commands to install: \n"
+            """(1) pip install "git+https://github.com/Dao-AILab/flash-attention.git#egg=flashattn-hopper&subdirectory=hopper" \n"""
+            """(2) python_path=`python -c "import site; print(site.getsitepackages()[0])"` \n"""
+            """(3) mkdir -p $python_path/flashattn_hopper \n"""
+            """(4) wget -P $python_path/flashattn_hopper https://raw.githubusercontent.com/Dao-AILab/flash-attention/main/hopper/flash_attn_interface.py"""
+        )
 else:
     from flashattn_hopper.flash_attn_interface import flash_attn_func as flash_attn_func_v3
     from flashattn_hopper.flash_attn_interface import (
@@ -136,10 +140,6 @@ _log_level = _log_levels[_log_level if _log_level in [0, 1, 2] else 2]
 _formatter = logging.Formatter("[%(levelname)-8s | %(name)-19s]: %(message)s")
 _stream_handler = logging.StreamHandler()
 _stream_handler.setFormatter(_formatter)
-
-_NVTE_FLASH_ATTN = int(os.getenv("NVTE_FLASH_ATTN", "1"))
-_NVTE_FUSED_ATTN = int(os.getenv("NVTE_FUSED_ATTN", "1"))
-_NVTE_UNFUSED_ATTN = int(os.getenv("NVTE_UNFUSED_ATTN", "1"))
 
 _attention_backends = {
     "attention_params": None,
@@ -382,8 +382,13 @@ def get_attention_backend(
 
     # Filter: Execution type
     if fp8 and fp8_meta["recipe"].fp8_dpa:
-        if use_flash_attention and is_training:
-            logger.debug("Disabling FlashAttention as it does not support FP8 training")
+        if use_flash_attention and not _use_flash_attn_3:
+            logger.debug("Disabling FlashAttention as FlashAttention 2 does not support FP8")
+            use_flash_attention = False
+        if use_flash_attention and _use_flash_attn_3 and is_training:
+            logger.debug(
+                "Disabling FlashAttention as FlashAttention 3 does not support FP8 training"
+            )
             use_flash_attention = False
         if use_unfused_attention:
             logger.debug("Disabling UnfusedDotProductAttention as it does not support FP8")
@@ -819,6 +824,21 @@ def get_attention_backend(
                 "for performance reasons"
             )
             use_flash_attention = False
+
+    # Select FusedAttention for FP8
+    # FA3 uses default scaling factors (i.e. 1) in FP8 execution, while FusedAttention takes
+    # scaling factors from `fp8_meta` and offers more accurate quantization/de-quantization
+    if (
+        use_flash_attention
+        and use_fused_attention
+        and fused_attention_backend == FusedAttnBackend["FP8"]
+        and _use_flash_attn_3
+    ):
+        logger.debug(
+            "Disabling FlashAttention 3 to give FusedAttention preference as FusedAttention "
+            "supports more accurate scaling factors in FP8 execution"
+        )
+        use_flash_attention = False
 
     # Selected backend
     if use_flash_attention:
@@ -3387,6 +3407,75 @@ class AttnFuncWithCPAndKVAllGather(torch.autograd.Function):
         )
 
 
+@torch.compile
+def get_chunk_ids_for_a2a(cp_size, device):
+    """Compute sequence chunk ids for A2A communication."""
+    chunk_ids = torch.empty(2, 2*cp_size, dtype=torch.int32, device=device)
+    for rank in range(cp_size):
+        chunk_ids[0][rank] = 2*rank
+        chunk_ids[0][rank+cp_size] = 2*cp_size-2*rank-1
+        chunk_ids[1][2*rank] = rank
+        chunk_ids[1][2*rank+1] = 2*cp_size-rank-1
+    return chunk_ids
+
+
+def flash_attn_a2a_communicate(a2a_inputs, chunk_ids, seq_dim, cp_size, cp_group, cp_stream, before_attn):
+    a2a_inputs = [a2a_inputs] if not isinstance(a2a_inputs, list) else a2a_inputs
+    a2a_outputs, a2a_reqs = [], []
+    if before_attn:
+        for i in range(len(a2a_inputs) + 1):
+            if i < len(a2a_inputs):
+                x = a2a_inputs[i]
+                # [b, s, np, hn] -> [b, s, cp, np//cp, hn] or [s, b, np, hn] -> [s, b, cp, np//cp, hn]
+                x = x.view(*x.shape[:-2], cp_size, x.shape[-2] // cp_size, x.shape[-1])
+                # [b, s, cp, np//cp, hn] -> [cp, b, s, np//cp, hn] or [s, b, cp, np//cp, hn] -> [cp, s, b, np//cp, hn]
+                x = x.movedim(-3, 0).contiguous()
+                x_ = torch.empty_like(x)
+                a2a_outputs.append(x_)
+                a2a_req = torch.distributed.all_to_all_single(x_, x, group=cp_group, async_op=True)
+                a2a_reqs.append(a2a_req)
+            if i > 0:
+                with torch.cuda.stream(cp_stream):
+                    a2a_reqs[i - 1].wait()
+                    x = a2a_outputs[i - 1]
+                    # [cp, b, s, np//cp, hn] -> [b, cp, s, np//cp, hn] or [cp, s, b, np//cp, hn] -> [cp, s, b, np//cp, hn]
+                    x = x.movedim(0, seq_dim).contiguous()
+                    # [b, cp, s, np//cp, hn] -> [b, cp*2, s//2, np//cp, hn] or [cp, s, b, np//cp, hn] -> [cp*2, s//2, b, np//cp, hn]
+                    x = x.view(*x.shape[:seq_dim], cp_size * 2, -1, *x.shape[(seq_dim+2):])
+                    # reorder the sequence chunks
+                    x = torch.index_select(x, dim=seq_dim, index=chunk_ids)
+                    # [b, cp*2, s//2, np//cp, hn] -> [b, cp*s, np//cp, hn] or [cp*2, s//2, b, np//cp, hn] -> [cp*s, b, np//cp, hn]
+                    x = x.view(*x.shape[:seq_dim], -1, *x.shape[(seq_dim+2):])
+                    a2a_outputs[i - 1] = x
+    else:
+        for i in range(len(a2a_inputs) + 1):
+            if i < len(a2a_inputs):
+                x = a2a_inputs[i]
+                # [b, cp*s, np//cp, hn] -> [b, cp*2, s//2, np//cp, hn] or [cp*s, b, np//cp, hn] -> [cp*2, s//2, b, np//cp, hn]
+                x = x.view(*x.shape[:seq_dim], cp_size * 2, -1, *x.shape[(seq_dim+1):])
+                # reorder the sequence chunks
+                x = torch.index_select(x, dim=seq_dim, index=chunk_ids)
+                # [b, cp*2, s//2, np//cp, hn] -> [b, cp, s, np//cp, hn] or [cp*2, s//2, b, np//cp, hn] -> [cp, s, b, np//cp, hn]
+                x = x.view(*x.shape[:seq_dim], cp_size, -1, *x.shape[(seq_dim+2):])
+                # [b, cp, s, np//cp, hn] -> [cp, b, s, np//cp, hn] or [cp, s, b, np//cp, hn] -> [cp, s, b, np//cp, hn]
+                x = x.movedim(seq_dim, 0).contiguous()
+                x_ = torch.empty_like(x)
+                a2a_outputs.append(x_)
+                a2a_req = torch.distributed.all_to_all_single(x_, x, group=cp_group, async_op=True)
+                a2a_reqs.append(a2a_req)
+            if i > 0:
+                with torch.cuda.stream(cp_stream):
+                    a2a_reqs[i - 1].wait()
+                    x = a2a_outputs[i - 1]
+                    # [cp, b, s, np//cp, hn] -> [b, s, cp, np//cp, hn] or [cp, s, b, np//cp, hn] -> [s, b, cp, np//cp, hn]
+                    x = x.movedim(0, -3).contiguous()
+                    # [b, s, cp, np//cp, hn] -> [b, s, np, hn] or [s, b, cp, np//cp, hn] -> [s, b, np, hn]
+                    x = x.view(*x.shape[:-3], -1, x.shape[-1])
+                    a2a_outputs[i - 1] = x
+    torch.cuda.current_stream().wait_stream(cp_stream)
+    return a2a_outputs[0] if len(a2a_inputs) == 1 else a2a_outputs
+
+
 class AttnFuncWithCPAndQKVOA2A(torch.autograd.Function):
     """
     Attention implementation with context parallelism.
@@ -3418,6 +3507,7 @@ class AttnFuncWithCPAndQKVOA2A(torch.autograd.Function):
         fp8,
         fp8_meta,
         cp_group,
+        cp_stream,
     ):
         if softmax_scale is None:
             softmax_scale = q.shape[-1] ** (-0.5)
@@ -3466,7 +3556,7 @@ class AttnFuncWithCPAndQKVOA2A(torch.autograd.Function):
                     fp8_meta["scaling_fwd"].scale_inv[META_QKV] = q._scale_inv
                     q_fp8, k_fp8, v_fp8 = q, k, v
                     q, k, v = q_fp8._data, k_fp8._data, v_fp8._data
-                else:
+                elif int(os.getenv("NVTE_FP8_DPA_BWD", "1")):
                     q_f16, k_f16, v_f16 = q, k, v
                     q, k, v = [
                         cast_to_fp8(
@@ -3488,26 +3578,16 @@ class AttnFuncWithCPAndQKVOA2A(torch.autograd.Function):
                 fused_attn_qkv_dtype = TE_DType[q.dtype]
                 fused_attn_backend = FusedAttnBackend["F16_arbitrary_seqlen"]
 
-        # [b, s, np, hn] -> [b, s, cp, np//cp, hn] or [s, b, np, hn] -> [s, b, cp, np//cp, hn]
-        q, k, v = [x.view(*x.shape[:-2], cp_size, x.shape[-2] // cp_size, x.shape[-1]) for x in [q, k, v]]
-        # [b, s, cp, np//cp, hn] -> [cp, b, s, np//cp, hn] or [s, b, cp, np//cp, hn] -> [cp, s, b, np//cp, hn]
-        q, k, v = [x.movedim(-3, 0).contiguous() for x in [q, k, v]]
-        q_, k_, v_ = [torch.empty_like(x) for x in [q, k, v]]
-        for x_, x in zip([q_, k_, v_], [q, k, v]):
-            torch.distributed.all_to_all_single(x_, x, group=cp_group)
-        q, k, v = q_, k_, v_
-        # [cp, b, s, np//cp, hn] -> [b, cp, s, np//cp, hn] or [cp, s, b, np//cp, hn] -> [cp, s, b, np//cp, hn]
-        q, k, v = [x.movedim(0, seq_dim).contiguous() for x in [q, k, v]]
-        # [b, cp, s, np//cp, hn] -> [b, cp*2, s//2, np//cp, hn] or [cp, s, b, np//cp, hn] -> [cp*2, s//2, b, np//cp, hn]
-        q, k, v = [x.view(*x.shape[:seq_dim], cp_size * 2, -1, *x.shape[(seq_dim+2):]) for x in [q, k, v]]
-        # reorder the sequence chunks
-        chunk_ids = torch.empty(2*cp_size, dtype=torch.int32, device=q.device)
-        for rank in range(cp_size):
-            chunk_ids[rank] = 2*rank
-            chunk_ids[rank+cp_size] = 2*cp_size-2*rank-1
-        q, k, v = [torch.index_select(x, dim=seq_dim, index=chunk_ids) for x in [q, k, v]]
-        # [b, cp*2, s//2, np//cp, hn] -> [b, cp*s, np//cp, hn] or [cp*2, s//2, b, np//cp, hn] -> [cp*s, b, np//cp, hn]
-        q, k, v = [x.view(*x.shape[:seq_dim], -1, *x.shape[(seq_dim+2):]) for x in [q, k, v]]
+        chunk_ids = get_chunk_ids_for_a2a(cp_size, q.device)
+        q, k, v = flash_attn_a2a_communicate([q, k, v], chunk_ids[0], seq_dim, cp_size, cp_group, cp_stream, True)
+
+        if fp8 and not fp8_meta["recipe"].fp8_mha and not int(os.getenv("NVTE_FP8_DPA_BWD", "1")):
+            q_f16, k_f16, v_f16 = q, k, v
+            q, k, v = [
+                cast_to_fp8(
+                    x, fp8_meta["scaling_fwd"], META_QKV, fp8_dtype_forward
+                ) for x in [q_f16, k_f16, v_f16]
+            ]
 
         if use_fused_attention:
             if fp8 and get_distributed_rank(cp_group) == 0:
@@ -3576,24 +3656,7 @@ class AttnFuncWithCPAndQKVOA2A(torch.autograd.Function):
             # [b*cp*s, np//cp, hn] -> [b, cp*s, np//cp, hn]
             out = out.view(ctx.batch_size, -1, *out.shape[-2:])
 
-        # [b, cp*s, np//cp, hn] -> [b, cp*2, s//2, np//cp, hn] or [cp*s, b, np//cp, hn] -> [cp*2, s//2, b, np//cp, hn]
-        out = out.view(*out.shape[:seq_dim], cp_size * 2, -1, *out.shape[(seq_dim+1):])
-        # reorder the sequence chunks
-        for rank in range(cp_size):
-            chunk_ids[2*rank] = rank
-            chunk_ids[2*rank+1] = 2*cp_size-rank-1
-        out = torch.index_select(out, dim=seq_dim, index=chunk_ids)
-        # [b, cp*2, s//2, np//cp, hn] -> [b, cp, s, np//cp, hn] or [cp*2, s//2, b, np//cp, hn] -> [cp, s, b, np//cp, hn]
-        out = out.view(*out.shape[:seq_dim], cp_size, -1, *out.shape[(seq_dim+2):])
-        # [b, cp, s, np//cp, hn] -> [cp, b, s, np//cp, hn] or [cp, s, b, np//cp, hn] -> [cp, s, b, np//cp, hn]
-        out = out.movedim(seq_dim, 0).contiguous()
-        out_ = torch.empty_like(out)
-        torch.distributed.all_to_all_single(out_, out, group=cp_group)
-        out = out_
-        # [cp, b, s, np//cp, hn] -> [b, s, cp, np//cp, hn] or [cp, s, b, np//cp, hn] -> [s, b, cp, np//cp, hn]
-        out = out.movedim(0, -3).contiguous()
-        # [b, s, cp, np//cp, hn] -> [b, s, np, hn] or [s, b, cp, np//cp, hn] -> [s, b, np, hn]
-        out = out.view(*out.shape[:-3], -1, out.shape[-1])
+        out = flash_attn_a2a_communicate(out, chunk_ids[1], seq_dim, cp_size, cp_group, cp_stream, False)
 
         if not use_fused_attention:
             # [b, s, np, hn] -> [b*s, np, hn]
@@ -3635,7 +3698,7 @@ class AttnFuncWithCPAndQKVOA2A(torch.autograd.Function):
                         fp8_meta_index=META_QKV,
                         fp8_dtype=fp8_dtype_forward,
                         dtype=out_fp8.dtype,
-                    ) for x, x_fp8 in [q, k, v]
+                    ) for x in [q, k, v]
                 ]
                 q_save, k_save, v_save, out_save = q_fp8, k_fp8, v_fp8, out_fp8
             else:
@@ -3663,6 +3726,7 @@ class AttnFuncWithCPAndQKVOA2A(torch.autograd.Function):
             *aux_ctx_tensors,
         )
         ctx.cp_group = cp_group
+        ctx.cp_stream = cp_stream
         ctx.dropout_p = dropout_p
         ctx.max_seqlen_q = max_seqlen_q
         ctx.max_seqlen_kv = max_seqlen_kv
@@ -3734,26 +3798,8 @@ class AttnFuncWithCPAndQKVOA2A(torch.autograd.Function):
             out = out.view(ctx.batch_size, -1, *out.shape[-2:])
         dout = dout.view(*out.shape)
 
-        # [b, s, np, hn] -> [b, s, cp, np//cp, hn] or [s, b, np, hn] -> [s, b, cp, np//cp, hn]
-        out, dout = [x.view(*x.shape[:-2], cp_size, x.shape[-2] // cp_size, x.shape[-1]) for x in [out, dout]]
-        # [b, s, cp, np//cp, hn] -> [cp, b, s, np//cp, hn] or [s, b, cp, np//cp, hn] -> [cp, s, b, np//cp, hn]
-        out, dout = [x.movedim(-3, 0).contiguous() for x in [out, dout]]
-        out_, dout_ = [torch.empty_like(x) for x in [out, dout]]
-        for x_, x in zip([out_, dout_], [out, dout]):
-            torch.distributed.all_to_all_single(x_, x, group=ctx.cp_group)
-        out, dout = out_, dout_
-        # [cp, b, s, np//cp, hn] -> [b, cp, s, np//cp, hn] or [cp, s, b, np//cp, hn] -> [cp, s, b, np//cp, hn]
-        out, dout = [x.movedim(0, seq_dim).contiguous() for x in [out, dout]]
-        # [b, cp, s, np//cp, hn] -> [b, cp*2, s//2, np//cp, hn] or [cp, s, b, np//cp, hn] -> [cp*2, s//2, b, np//cp, hn]
-        out, dout = [x.view(*x.shape[:seq_dim], cp_size * 2, -1, *x.shape[(seq_dim+2):]) for x in [out, dout]]
-        # reorder the sequence chunks
-        chunk_ids = torch.empty(2*cp_size, dtype=torch.int32, device=q.device)
-        for rank in range(cp_size):
-            chunk_ids[rank] = 2*rank
-            chunk_ids[rank+cp_size] = 2*cp_size-2*rank-1
-        out, dout = [torch.index_select(x, dim=seq_dim, index=chunk_ids) for x in [out, dout]]
-        # [b, cp*2, s//2, np//cp, hn] -> [b, cp*s, np//cp, hn] or [cp*2, s//2, b, np//cp, hn] -> [cp*s, b, np//cp, hn]
-        out, dout = [x.view(*x.shape[:seq_dim], -1, *x.shape[(seq_dim+2):]) for x in [out, dout]]
+        chunk_ids = get_chunk_ids_for_a2a(cp_size, q.device)
+        out, dout = flash_attn_a2a_communicate([out, dout], chunk_ids[0], seq_dim, cp_size, ctx.cp_group, ctx.cp_stream, True)
 
         fa_optional_backward_kwargs = {}
         if _flash_attn_2_3_plus:
@@ -3829,25 +3875,7 @@ class AttnFuncWithCPAndQKVOA2A(torch.autograd.Function):
             )
             dq, dk, dv = [x.view(ctx.batch_size, -1, *x.shape[-2:]) for x in [dq, dk, dv]]
 
-        # [b, cp*s, np//cp, hn] -> [b, cp*2, s//2, np//cp, hn] or [cp*s, b, np//cp, hn] -> [cp*2, s//2, b, np//cp, hn]
-        dq, dk, dv = [x.view(*x.shape[:seq_dim], cp_size * 2, -1, *x.shape[(seq_dim+1):]) for x in [dq, dk, dv]]
-        # reorder the sequence chunks
-        for rank in range(cp_size):
-            chunk_ids[2*rank] = rank
-            chunk_ids[2*rank+1] = 2*cp_size-rank-1
-        dq, dk, dv = [torch.index_select(x, dim=seq_dim, index=chunk_ids) for x in [dq, dk, dv]]
-        # [b, cp*2, s//2, np//cp, hn] -> [b, cp, s, np//cp, hn] or [cp*2, s//2, b, np//cp, hn] -> [cp, s, b, np//cp, hn]
-        dq, dk, dv = [x.view(*x.shape[:seq_dim], cp_size, -1, *x.shape[(seq_dim+2):]) for x in [dq, dk, dv]]
-        # [b, cp, s, np//cp, hn] -> [cp, b, s, np//cp, hn] or [cp, s, b, np//cp, hn] -> [cp, s, b, np//cp, hn]
-        dq, dk, dv = [x.movedim(seq_dim, 0).contiguous() for x in [dq, dk, dv]]
-        dq_, dk_, dv_ = [torch.empty_like(x) for x in [dq, dk, dv]]
-        for x_, x in zip([dq_, dk_, dv_], [dq, dk, dv]):
-            torch.distributed.all_to_all_single(x_, x, group=ctx.cp_group)
-        dq, dk, dv = dq_, dk_, dv_
-        # [cp, b, s, np//cp, hn] -> [b, s, cp, np//cp, hn] or [cp, s, b, np//cp, hn] -> [s, b, cp, np//cp, hn]
-        dq, dk, dv = [x.movedim(0, -3).contiguous() for x in [dq, dk, dv]]
-        # [b, s, cp, np//cp, hn] -> [b, s, np, hn] or [s, b, cp, np//cp, hn] -> [s, b, np, hn]
-        dq, dk, dv = [x.view(*x.shape[:-3], -1, x.shape[-1]) for x in [dq, dk, dv]]
+        dq, dk, dv = flash_attn_a2a_communicate([dq, dk, dv], chunk_ids[1], seq_dim, cp_size, ctx.cp_group, ctx.cp_stream, False)
 
         if ctx.fp8:
             if ctx.fp8_meta["recipe"].fp8_mha:
@@ -3877,6 +3905,7 @@ class AttnFuncWithCPAndQKVOA2A(torch.autograd.Function):
             dq,
             dk,
             dv,
+            None,
             None,
             None,
             None,
@@ -3989,7 +4018,7 @@ def attn_forward_func_with_cp(
         args += (window_size, cp_group, cp_stream)
         out = AttnFuncWithCPAndKVAllGather.apply(*args)
     elif cp_comm_type == "a2a":
-        args += (window_size, fp8, fp8_meta, cp_group)
+        args += (window_size, fp8, fp8_meta, cp_group, cp_stream)
         out = AttnFuncWithCPAndQKVOA2A.apply(*args)
     else:
         raise ValueError(f"Unsupported communication type: {cp_comm_type}!")
