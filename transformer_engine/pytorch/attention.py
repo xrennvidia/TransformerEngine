@@ -3012,11 +3012,9 @@ class AttnFuncWithCPAndKVAllGather(torch.autograd.Function):
         k,
         v,
         cu_seqlens_q,
-        cu_seqlens_kv,
         max_seqlen_q,
         max_seqlen_kv,
         cu_seqlens_q_padded,
-        cu_seqlens_kv_padded,
         dropout_p,
         softmax_scale,
         qkv_format,
@@ -3395,8 +3393,6 @@ class AttnFuncWithCPAndKVAllGather(torch.autograd.Function):
             None,
             None,
             None,
-            None,
-            None,
         )
 
 
@@ -3434,7 +3430,7 @@ def flash_attn_a2a_communicate(
     a2a_outputs, a2a_reqs = [None] * len(a2a_inputs), [None] * len(a2a_inputs)
     if before_attn:
         for i in range(len(a2a_inputs) + 2):
-            if i > 0 and i < len(a2a_inputs) + 1:
+            if 0 < i < len(a2a_inputs) + 1:
                 a2a_outputs[i - 1] = torch.empty_like(a2a_inputs[i - 1])
                 a2a_reqs[i - 1] = torch.distributed.all_to_all_single(
                     a2a_outputs[i - 1], a2a_inputs[i - 1], group=cp_group, async_op=True
@@ -3457,7 +3453,7 @@ def flash_attn_a2a_communicate(
                 a2a_inputs[i] = x.movedim(-3, 0).contiguous()
     else:
         for i in range(len(a2a_inputs) + 2):
-            if i > 0 and i < len(a2a_inputs) + 1:
+            if 0 < i < len(a2a_inputs) + 1:
                 a2a_outputs[i - 1] = torch.empty_like(a2a_inputs[i - 1])
                 a2a_reqs[i - 1] = torch.distributed.all_to_all_single(
                     a2a_outputs[i - 1], a2a_inputs[i - 1], group=cp_group, async_op=True
@@ -3573,12 +3569,18 @@ class AttnFuncWithCPAndQKVOA2A(torch.autograd.Function):
                         for x in [q_f16, k_f16, v_f16]
                     ]
                 fp8_meta_kwargs = {}
-                fp8_meta_kwargs["d_scale_qkv"] = fp8_meta["scaling_fwd"].scale_inv[META_QKV]
-                fp8_meta_kwargs["d_scale_s"] = fp8_meta["scaling_fwd"].scale_inv[META_S]
-                fp8_meta_kwargs["q_scale_s"] = fp8_meta["scaling_fwd"].scale[META_S]
-                fp8_meta_kwargs["q_scale_o"] = fp8_meta["scaling_fwd"].scale[META_O]
-                fp8_meta_kwargs["amax_s"] = fp8_meta["scaling_fwd"].amax_history[0][META_S]
-                fp8_meta_kwargs["amax_o"] = fp8_meta["scaling_fwd"].amax_history[0][META_O]
+                fp8_meta_kwargs["d_scale_qkv"] = fp8_meta["scaling_fwd"].scale_inv
+                fp8_meta_kwargs["d_scale_qkv_offset"] = META_QKV
+                fp8_meta_kwargs["d_scale_s"] = fp8_meta["scaling_fwd"].scale_inv
+                fp8_meta_kwargs["d_scale_s_offset"] = META_S
+                fp8_meta_kwargs["q_scale_s"] = fp8_meta["scaling_fwd"].scale
+                fp8_meta_kwargs["q_scale_s_offset"] = META_S
+                fp8_meta_kwargs["q_scale_o"] = fp8_meta["scaling_fwd"].scale
+                fp8_meta_kwargs["q_scale_o_offset"] = META_O
+                fp8_meta_kwargs["amax_s"] = fp8_meta["scaling_fwd"].amax_history
+                fp8_meta_kwargs["amax_s_offset"] = META_S
+                fp8_meta_kwargs["amax_o"] = fp8_meta["scaling_fwd"].amax_history
+                fp8_meta_kwargs["amax_o_offset"] = META_O
             else:
                 assert False, "FP8 is only supported with Fused Attention!"
         else:
@@ -4027,7 +4029,7 @@ def attn_forward_func_with_cp(
         or (cp_comm_type == "all_gather" and not use_fused_attention)
     ), "The context parallel running configs cannot support sliding window attetnion!"
 
-    args = (
+    args = [
         is_training,
         q,
         k,
@@ -4046,16 +4048,18 @@ def attn_forward_func_with_cp(
         attn_bias,
         deterministic,
         use_fused_attention,
-    )
+    ]
 
     if cp_comm_type == "p2p":
-        args += (fp8, fp8_meta, cp_group, cp_global_ranks, cp_stream)
+        args += [fp8, fp8_meta, cp_group, cp_global_ranks, cp_stream]
         out = AttnFuncWithCPAndKVP2P.apply(*args)
     elif cp_comm_type == "all_gather":
-        args += (window_size, cp_group, cp_stream)
+        args.pop(5)
+        args.pop(8)
+        args += [window_size, cp_group, cp_stream]
         out = AttnFuncWithCPAndKVAllGather.apply(*args)
     elif cp_comm_type == "a2a":
-        args += (window_size, fp8, fp8_meta, cp_group, cp_stream)
+        args += [window_size, fp8, fp8_meta, cp_group, cp_stream]
         out = AttnFuncWithCPAndQKVOA2A.apply(*args)
     else:
         raise ValueError(f"Unsupported communication type: {cp_comm_type}!")
