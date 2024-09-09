@@ -4469,7 +4469,7 @@ def attn_forward_func_with_cp(
             args += [window_size, fp8, fp8_meta, cp_group, cp_stream]
             out = AttnFuncWithCPAndQKVOA2A.apply(*args)
         else:
-            assert(False), f"Context parallelism does not support split dim of {cp_split_dim}"
+            raise ValueError(f"Unsupported communication type: {cp_comm_type}!")
             #out = FlashAttnUnpaddedFuncWithCPSplitSeq_v0.apply(
             #    q,
             #    k,
@@ -4504,6 +4504,8 @@ def attn_forward_func_with_cp(
             attn_mask_type,
             deterministic
         )
+    else:
+        assert(False), f"Context parallelism does not support split dim of {cp_split_dim}"
 
     return out
 
