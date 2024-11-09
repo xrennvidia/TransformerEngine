@@ -82,12 +82,15 @@ class _GroupedLinear(torch.autograd.Function):
         activation_dtype: torch.dtype,
         parallel_mode: Union[str, None],
         is_grad_enabled: bool,
+        dump_debug_info: bool,
+        enable_cuda_graph: bool,
         weights_fp8: List[Union[Float8Tensor, None]],
         *weights_and_biases: Union[Float8Tensor, torch.Tensor, None],
     ) -> torch.Tensor:
         num_gemms = len(m_splits)
-        weights = weights_and_biases[:num_gemms]
-        biases = weights_and_biases[num_gemms:]
+        weights = weights_and_biases[: num_gemms]
+        biases = weights_and_biases[num_gemms : 2 * num_gemms]
+        debug_wgrads = weights_and_biases[2 * num_gemms :]
 
         # Make sure input dimensions are compatible
         in_features = weights[0].shape[-1]
@@ -239,6 +242,7 @@ class _GroupedLinear(torch.autograd.Function):
                     w.main_grad if cpu_offloading and fuse_wgrad_accumulation else None
                     for w in weights
                 ],
+                *debug_wgrads,
             )
             ctx.m_splits = m_splits
             ctx.num_gemms = num_gemms
@@ -257,6 +261,8 @@ class _GroupedLinear(torch.autograd.Function):
             ctx.tp_size = tp_size
             ctx.requires_dgrad = inp.requires_grad
             ctx.reduce_and_update_bwd_fp8_tensors = False
+            ctx.dump_debug_info = dump_debug_info
+            ctx.enable_cuda_graph = enable_cuda_graph
             if ctx.fp8 and requires_grad(inp, weights[0], biases[0]):
                 ctx.reduce_and_update_bwd_fp8_tensors = (
                     ctx.reduce_and_update_bwd_fp8_tensors
@@ -277,7 +283,8 @@ class _GroupedLinear(torch.autograd.Function):
             inputmats_t = saved_tensors[ctx.num_gemms : 2 * ctx.num_gemms]
             weights = saved_tensors[2 * ctx.num_gemms : 3 * ctx.num_gemms]
             weights_fp8 = saved_tensors[3 * ctx.num_gemms : 4 * ctx.num_gemms]
-            main_grads = saved_tensors[4 * ctx.num_gemms :]
+            main_grads = saved_tensors[4 * ctx.num_gemms : 5 * ctx.num_gemms]
+            debug_wgrads = saved_tensors[5 * ctx.num_gemms :]
             if ctx.cpu_offloading and ctx.fuse_wgrad_accumulation:
                 for i in ctx.num_gemms:
                     w = torch.nn.Parameter(weights[i], weights[i].requires_grad)
@@ -441,6 +448,13 @@ class _GroupedLinear(torch.autograd.Function):
             if not ctx.use_bias:
                 grad_biases = [None] * ctx.num_gemms
 
+        if ctx.dump_debug_info:
+            for i, debug_wgrad, wgrad in enumerate(zip(debug_wgrads, wgrad_list)):
+                if ctx.enable_cuda_graph:
+                    debug_wgrad.copy_(wgrad)
+                else:
+                    print(f"rank_0_0_0_0, wagrd{i} {wgrad.shape} {wgrad}")
+
         def handle_custom_ddp_from_mcore(w, wgrad):
             if w.requires_grad:
                 if ctx.fuse_wgrad_accumulation and hasattr(w, "grad_added_to_main_grad"):
@@ -472,6 +486,8 @@ class _GroupedLinear(torch.autograd.Function):
         if ctx.reduce_and_update_bwd_fp8_tensors and not is_graph_capturing():
             FP8GlobalStateManager.reduce_and_update_fp8_tensors(forward=False)
 
+        debug_tensor_dgrads = [None] * ctx.num_gemms
+
         return (
             dgrad.view(ctx.inp_shape) if ctx.requires_dgrad else None,
             None,  # m_splits
@@ -489,9 +505,12 @@ class _GroupedLinear(torch.autograd.Function):
             None,  # activation_dtype
             None,  # parallel_mode
             None,  # is_grad_enabled
+            None,  # dump_debug_info
+            None,  # enable_cuda_graph
             None,  # weights_fp8
             *wgrad_list,
             *grad_biases,
+            *debug_tensor_dgrads,
         )
 
 
@@ -578,6 +597,8 @@ class GroupedLinear(TransformerEngineBaseModule):
         ub_overlap_rs: bool = False,
         ub_overlap_ag: bool = False,
         ub_name: Optional[str] = None,
+        dump_debug_info: bool = False,
+        enable_cuda_graph: bool = False,
     ) -> None:
         super().__init__()
 
@@ -597,6 +618,8 @@ class GroupedLinear(TransformerEngineBaseModule):
         ), "GroupedLinear doesn't support Userbuffer overlap."
         self.get_rng_state_tracker = get_rng_state_tracker
         self.rng_tracker_name = rng_tracker_name
+        self.dump_debug_info = dump_debug_info
+        self.enable_cuda_graph = enable_cuda_graph
 
         global _GEMM_INPUT, _GEMM_WEIGHT, _GEMM_OUTPUT
         _GEMM_INPUT, _GEMM_WEIGHT, _GEMM_OUTPUT = 0, num_gemms, 2 * num_gemms
@@ -638,6 +661,17 @@ class GroupedLinear(TransformerEngineBaseModule):
                 get_rng_state_tracker=get_rng_state_tracker,
                 fp8_meta_index=_GEMM_WEIGHT + i,
             )
+
+            if self.dump_debug_info and self.enable_cuda_graph:
+                wgrad = torch.empty(
+                    self.out_features,
+                    self.in_features,
+                    device=device,
+                    dtype=torch.bfloat16,
+                )
+            else:
+                wgrad = torch.Tensor().to(dtype=torch.bfloat16, device=device)
+            setattr(self, f"debug_wgrad{i}", wgrad)
 
             # Construct bias parameters if needed
             if self.use_bias:
@@ -736,6 +770,7 @@ class GroupedLinear(TransformerEngineBaseModule):
 
             weight_tensors = [getattr(self, f"weight{i}") for i in range(self.num_gemms)]
             bias_tensors = [getattr(self, f"bias{i}") for i in range(self.num_gemms)]
+            debug_wgrad_tensors = [getattr(self, f"debug_wgrad{i}") for i in range(self.num_gemms)]
             if not self.fp8:
                 weight_tensors = [
                     w.from_float8() if isinstance(w, Float8Tensor) else w for w in weight_tensors
@@ -801,9 +836,12 @@ class GroupedLinear(TransformerEngineBaseModule):
                 self.activation_dtype,
                 self.parallel_mode,
                 torch.is_grad_enabled(),
+                self.dump_debug_info,
+                self.enable_cuda_graph,
                 weight_tensors_fp8,
                 *weight_tensors,
                 *bias_tensors,
+                *debug_wgrad_tensors,
             )
             out = linear_fn(*args)
 
