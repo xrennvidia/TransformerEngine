@@ -449,7 +449,7 @@ class _GroupedLinear(torch.autograd.Function):
                 grad_biases = [None] * ctx.num_gemms
 
         if ctx.dump_debug_info:
-            for i, debug_wgrad, wgrad in enumerate(zip(debug_wgrads, wgrad_list)):
+            for i, (debug_wgrad, wgrad) in enumerate(zip(debug_wgrads, wgrad_list)):
                 if ctx.enable_cuda_graph:
                     debug_wgrad.copy_(wgrad)
                 else:
