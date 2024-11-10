@@ -675,7 +675,7 @@ class GroupedLinear(TransformerEngineBaseModule):
             )
             self.debug_grad_output = torch.empty(
                 8192,
-                self.out_features,
+                self.in_features,
                 device=device,
                 dtype=torch.bfloat16,
             )
