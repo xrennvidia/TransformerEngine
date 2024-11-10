@@ -667,19 +667,19 @@ class GroupedLinear(TransformerEngineBaseModule):
         self.sequence_parallel = (self.tp_size > 1) and sequence_parallel
 
         if self.dump_debug_info and self.enable_cuda_graph:
-            debug_grad_input = torch.empty(
+            self.debug_grad_input = torch.empty(
                 8192, 2560,
                 device=device,
                 dtype=torch.bfloat16,
             )
-            debug_grad_output = torch.empty(
+            self.debug_grad_output = torch.empty(
                 8192, 2560,
                 device=device,
                 dtype=torch.bfloat16,
             )
         else:
-            debug_grad_input = torch.Tensor().to(dtype=torch.bfloat16, device=device)
-            debug_grad_output = torch.Tensor().to(dtype=torch.bfloat16, device=device)
+            self.debug_grad_input = torch.Tensor().to(dtype=torch.bfloat16, device=device)
+            self.debug_grad_output = torch.Tensor().to(dtype=torch.bfloat16, device=device)
 
         for i in range(self.num_gemms):
             # Construct weight parameter
@@ -874,8 +874,8 @@ class GroupedLinear(TransformerEngineBaseModule):
                 torch.is_grad_enabled(),
                 self.dump_debug_info,
                 self.enable_cuda_graph,
-                debug_grad_input,
-                debug_grad_output,
+                self.debug_grad_input,
+                self.debug_grad_output,
                 debug_wgrad_tensors,
                 weight_tensors_fp8,
                 *weight_tensors,
