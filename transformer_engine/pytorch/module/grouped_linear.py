@@ -84,6 +84,7 @@ class _GroupedLinear(torch.autograd.Function):
         is_grad_enabled: bool,
         dump_debug_info: bool,
         enable_cuda_graph: bool,
+        debug_grad_input: torch.Tensor,
         debug_grad_output: torch.Tensor,
         debug_wgrads: List[Union[Float8Tensor, None]],
         weights_fp8: List[Union[Float8Tensor, None]],
@@ -234,6 +235,7 @@ class _GroupedLinear(torch.autograd.Function):
                             t.activation_offloading = True
 
             ctx.save_for_backward(
+                debug_grad_input,
                 debug_grad_output,
                 fp8_meta["scaling_fwd"].scale_inv.clone() if fp8 else None,
                 *saved_inputmats,
@@ -278,6 +280,7 @@ class _GroupedLinear(torch.autograd.Function):
     def backward(ctx, grad_output: torch.Tensor) -> Tuple[Union[torch.Tensor, None], ...]:
         with torch.cuda.nvtx.range("_GroupedLinear_backward"):
             (
+                debug_grad_input,
                 debug_grad_output,
                 fwd_scale_inverses,
                 *saved_tensors,
@@ -291,9 +294,9 @@ class _GroupedLinear(torch.autograd.Function):
 
             if ctx.dump_debug_info:
                 if ctx.enable_cuda_graph:
-                    debug_grad_output.copy_(grad_output)
+                    debug_grad_input.copy_(grad_output)
                 else:
-                    print(f"rank_0_0_0_0, grad_output {grad_output.shape} {grad_output}")
+                    print(f"grad_input {grad_output.shape} {grad_output}")
 
             if ctx.cpu_offloading and ctx.fuse_wgrad_accumulation:
                 for i in ctx.num_gemms:
@@ -496,8 +499,16 @@ class _GroupedLinear(torch.autograd.Function):
         if ctx.reduce_and_update_bwd_fp8_tensors and not is_graph_capturing():
             FP8GlobalStateManager.reduce_and_update_fp8_tensors(forward=False)
 
+        dgrad = dgrad.view(ctx.inp_shape) if ctx.requires_dgrad else None
+
+        if ctx.dump_debug_info and ctx.requires_dgrad:
+            if ctx.enable_cuda_graph:
+                debug_grad_output.copy_(dgrad)
+            else:
+                print(f"grad_output {dgrad.shape} {dgrad}")
+
         return (
-            dgrad.view(ctx.inp_shape) if ctx.requires_dgrad else None,
+            dgrad,
             None,  # m_splits
             None,  # use_bias
             None,  # is_first_microbatch
@@ -515,6 +526,7 @@ class _GroupedLinear(torch.autograd.Function):
             None,  # is_grad_enabled
             None,  # dump_debug_info
             None,  # enable_cuda_graph
+            None,  # debug_grad_input
             None,  # debug_grad_output
             None,  # debug_wgrads
             None,  # weights_fp8
@@ -655,12 +667,18 @@ class GroupedLinear(TransformerEngineBaseModule):
         self.sequence_parallel = (self.tp_size > 1) and sequence_parallel
 
         if self.dump_debug_info and self.enable_cuda_graph:
+            debug_grad_input = torch.empty(
+                8192, 2560,
+                device=device,
+                dtype=torch.bfloat16,
+            )
             debug_grad_output = torch.empty(
                 8192, 2560,
                 device=device,
                 dtype=torch.bfloat16,
             )
         else:
+            debug_grad_input = torch.Tensor().to(dtype=torch.bfloat16, device=device)
             debug_grad_output = torch.Tensor().to(dtype=torch.bfloat16, device=device)
 
         for i in range(self.num_gemms):
@@ -856,6 +874,7 @@ class GroupedLinear(TransformerEngineBaseModule):
                 torch.is_grad_enabled(),
                 self.dump_debug_info,
                 self.enable_cuda_graph,
+                debug_grad_input,
                 debug_grad_output,
                 debug_wgrad_tensors,
                 weight_tensors_fp8,
