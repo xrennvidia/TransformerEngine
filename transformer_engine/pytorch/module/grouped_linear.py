@@ -668,12 +668,14 @@ class GroupedLinear(TransformerEngineBaseModule):
 
         if self.dump_debug_info and self.enable_cuda_graph:
             self.debug_grad_input = torch.empty(
-                8192, 2560,
+                8192,
+                self.out_features,
                 device=device,
                 dtype=torch.bfloat16,
             )
             self.debug_grad_output = torch.empty(
-                8192, 2560,
+                8192,
+                self.out_features,
                 device=device,
                 dtype=torch.bfloat16,
             )
