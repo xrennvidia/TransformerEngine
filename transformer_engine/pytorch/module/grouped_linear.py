@@ -466,7 +466,7 @@ class _GroupedLinear(torch.autograd.Function):
                 if ctx.enable_cuda_graph:
                     debug_wgrad.copy_(wgrad)
                 else:
-                    print(f"rank_0_0_0_0, wgrad{i} {wgrad.shape} {wgrad}")
+                    print(f"wgrad{i} {wgrad.shape} {wgrad}")
 
         def handle_custom_ddp_from_mcore(w, wgrad):
             if w.requires_grad:
