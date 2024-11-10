@@ -84,13 +84,14 @@ class _GroupedLinear(torch.autograd.Function):
         is_grad_enabled: bool,
         dump_debug_info: bool,
         enable_cuda_graph: bool,
+        debug_grad_output: torch.Tensor,
+        debug_wgrads: List[Union[Float8Tensor, None]],
         weights_fp8: List[Union[Float8Tensor, None]],
         *weights_and_biases: Union[Float8Tensor, torch.Tensor, None],
     ) -> torch.Tensor:
         num_gemms = len(m_splits)
         weights = weights_and_biases[: num_gemms]
-        biases = weights_and_biases[num_gemms : 2 * num_gemms]
-        debug_wgrads = weights_and_biases[2 * num_gemms :]
+        biases = weights_and_biases[num_gemms :]
 
         # Make sure input dimensions are compatible
         in_features = weights[0].shape[-1]
@@ -233,6 +234,7 @@ class _GroupedLinear(torch.autograd.Function):
                             t.activation_offloading = True
 
             ctx.save_for_backward(
+                debug_grad_output,
                 fp8_meta["scaling_fwd"].scale_inv.clone() if fp8 else None,
                 *saved_inputmats,
                 *saved_inputmats_t,
@@ -276,6 +278,7 @@ class _GroupedLinear(torch.autograd.Function):
     def backward(ctx, grad_output: torch.Tensor) -> Tuple[Union[torch.Tensor, None], ...]:
         with torch.cuda.nvtx.range("_GroupedLinear_backward"):
             (
+                debug_grad_output,
                 fwd_scale_inverses,
                 *saved_tensors,
             ) = ctx.saved_tensors
@@ -285,6 +288,13 @@ class _GroupedLinear(torch.autograd.Function):
             weights_fp8 = saved_tensors[3 * ctx.num_gemms : 4 * ctx.num_gemms]
             main_grads = saved_tensors[4 * ctx.num_gemms : 5 * ctx.num_gemms]
             debug_wgrads = saved_tensors[5 * ctx.num_gemms :]
+
+            if ctx.dump_debug_info:
+                if ctx.enable_cuda_graph:
+                    debug_grad_output.copy_(grad_output)
+                else:
+                    print(f"rank_0_0_0_0, grad_output {grad_output.shape} {grad_output}")
+
             if ctx.cpu_offloading and ctx.fuse_wgrad_accumulation:
                 for i in ctx.num_gemms:
                     w = torch.nn.Parameter(weights[i], weights[i].requires_grad)
@@ -486,8 +496,6 @@ class _GroupedLinear(torch.autograd.Function):
         if ctx.reduce_and_update_bwd_fp8_tensors and not is_graph_capturing():
             FP8GlobalStateManager.reduce_and_update_fp8_tensors(forward=False)
 
-        debug_tensor_dgrads = [None] * ctx.num_gemms
-
         return (
             dgrad.view(ctx.inp_shape) if ctx.requires_dgrad else None,
             None,  # m_splits
@@ -507,10 +515,11 @@ class _GroupedLinear(torch.autograd.Function):
             None,  # is_grad_enabled
             None,  # dump_debug_info
             None,  # enable_cuda_graph
+            None,  # debug_grad_output
+            None,  # debug_wgrads
             None,  # weights_fp8
             *wgrad_list,
             *grad_biases,
-            *debug_tensor_dgrads,
         )
 
 
@@ -644,6 +653,15 @@ class GroupedLinear(TransformerEngineBaseModule):
             self.in_features = divide(self.in_features, self.tp_size)
 
         self.sequence_parallel = (self.tp_size > 1) and sequence_parallel
+
+        if self.dump_debug_info and self.enable_cuda_graph:
+            debug_grad_output = torch.empty(
+                8192, 2560,
+                device=device,
+                dtype=torch.bfloat16,
+            )
+        else:
+            debug_grad_output = torch.Tensor().to(dtype=torch.bfloat16, device=device)
 
         for i in range(self.num_gemms):
             # Construct weight parameter
@@ -838,10 +856,11 @@ class GroupedLinear(TransformerEngineBaseModule):
                 torch.is_grad_enabled(),
                 self.dump_debug_info,
                 self.enable_cuda_graph,
+                debug_grad_output,
+                debug_wgrad_tensors,
                 weight_tensors_fp8,
                 *weight_tensors,
                 *bias_tensors,
-                *debug_wgrad_tensors,
             )
             out = linear_fn(*args)
 
