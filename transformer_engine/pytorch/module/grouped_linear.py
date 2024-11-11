@@ -88,6 +88,7 @@ class _GroupedLinear(torch.autograd.Function):
         debug_grad_output: torch.Tensor,
         debug_inputmats: List[Union[Float8Tensor, None]],
         debug_wgrads: List[Union[Float8Tensor, None]],
+        debug_fused_wgrads: List[Union[Float8Tensor, None]],
         weights_fp8: List[Union[Float8Tensor, None]],
         *weights_and_biases: Union[Float8Tensor, torch.Tensor, None],
     ) -> torch.Tensor:
@@ -249,6 +250,7 @@ class _GroupedLinear(torch.autograd.Function):
                 ],
                 *debug_inputmats,
                 *debug_wgrads,
+                *debug_fused_wgrads,
             )
             ctx.m_splits = m_splits
             ctx.num_gemms = num_gemms
@@ -293,7 +295,8 @@ class _GroupedLinear(torch.autograd.Function):
             weights_fp8 = saved_tensors[3 * ctx.num_gemms : 4 * ctx.num_gemms]
             main_grads = saved_tensors[4 * ctx.num_gemms : 5 * ctx.num_gemms]
             debug_inputmats = saved_tensors[5 * ctx.num_gemms : 6 * ctx.num_gemms]
-            debug_wgrads = saved_tensors[6 * ctx.num_gemms :]
+            debug_wgrads = saved_tensors[6 * ctx.num_gemms : 7 * ctx.num_gemms]
+            debug_fused_wgrads = saved_tensors[7 * ctx.num_gemms :]
 
             if ctx.dump_debug_info:
                 if ctx.enable_cuda_graph:
@@ -445,6 +448,14 @@ class _GroupedLinear(torch.autograd.Function):
                         )
                 else:
                     # WGRAD
+                    if ctx.dump_debug_info:
+                        if ctx.enable_cuda_graph:
+                            for i, (debug_wgrad, wgrad) in enumerate(zip(debug_wgrads, wgrad_list)):
+                                debug_wgrad.copy_(wgrad)
+                        else:
+                            for i, wgrad in enumerate(wgrad_list):
+                                print(f"wgrad{i} {wgrad.shape} {wgrad}")
+
                     _, grad_biases, _ = grouped_gemm(
                         inputmats,
                         grad_output_mats,
@@ -461,13 +472,13 @@ class _GroupedLinear(torch.autograd.Function):
                         if ctx.enable_cuda_graph:
                             for i,  (debug_inputmat, inputmat) in enumerate(zip(debug_inputmats, inputmats)):
                                 debug_inputmat.copy_(inputmat)
-                            for i, (debug_wgrad, wgrad) in enumerate(zip(debug_wgrads, wgrad_list)):
-                                debug_wgrad.copy_(wgrad)
+                            for i, (debug_fused_wgrad, wgrad) in enumerate(zip(debug_fused_wgrads, wgrad_list)):
+                                debug_fused_wgrad.copy_(wgrad)
                         else:
                             for i, inputmat in enumerate(inputmats):
-                                print(f"inputmat_{i} {inputmat.shape} {inputmat}")
+                                print(f"inputmat{i} {inputmat.shape} {inputmat}")
                             for i, wgrad in enumerate(wgrad_list):
-                                print(f"wgrad{i} {wgrad.shape} {wgrad}")
+                                print(f"fused_wgrad{i} {wgrad.shape} {wgrad}")
 
                 # Deallocate input tensor
                 clear_tensor_data(*inputmats)
@@ -538,6 +549,7 @@ class _GroupedLinear(torch.autograd.Function):
             None,  # debug_grad_output
             None,  # debug_inputmats
             None,  # debug_wgrads
+            None,  # debug_fused_wgrads
             None,  # weights_fp8
             *wgrad_list,
             *grad_biases,
@@ -727,9 +739,17 @@ class GroupedLinear(TransformerEngineBaseModule):
                     device=device,
                     dtype=torch.bfloat16,
                 )
+                fused_wgrad = torch.empty(
+                    self.out_features,
+                    self.in_features,
+                    device=device,
+                    dtype=torch.bfloat16,
+                )
             else:
                 wgrad = torch.Tensor().to(dtype=torch.bfloat16, device=device)
+                fused_wgrad = torch.Tensor().to(dtype=torch.bfloat16, device=device)
             setattr(self, f"debug_wgrad{i}", wgrad)
+            setattr(self, f"debug_fused_wgrad{i}", fused_wgrad)
 
             # Construct bias parameters if needed
             if self.use_bias:
@@ -830,6 +850,7 @@ class GroupedLinear(TransformerEngineBaseModule):
             bias_tensors = [getattr(self, f"bias{i}") for i in range(self.num_gemms)]
             debug_inputmat_tensors = [getattr(self, f"debug_inputmat{i}") for i in range(self.num_gemms)]
             debug_wgrad_tensors = [getattr(self, f"debug_wgrad{i}") for i in range(self.num_gemms)]
+            debug_fused_wgrad_tensors = [getattr(self, f"debug_fused_wgrad{i}") for i in range(self.num_gemms)]
             if not self.fp8:
                 weight_tensors = [
                     w.from_float8() if isinstance(w, Float8Tensor) else w for w in weight_tensors
@@ -901,6 +922,7 @@ class GroupedLinear(TransformerEngineBaseModule):
                 self.debug_grad_output,
                 debug_inputmat_tensors,
                 debug_wgrad_tensors,
+                debug_fused_wgrad_tensors,
                 weight_tensors_fp8,
                 *weight_tensors,
                 *bias_tensors,
