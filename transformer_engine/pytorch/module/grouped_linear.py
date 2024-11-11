@@ -536,6 +536,7 @@ class _GroupedLinear(torch.autograd.Function):
             None,  # enable_cuda_graph
             None,  # debug_grad_input
             None,  # debug_grad_output
+            None,  # debug_inputmats
             None,  # debug_wgrads
             None,  # weights_fp8
             *wgrad_list,
