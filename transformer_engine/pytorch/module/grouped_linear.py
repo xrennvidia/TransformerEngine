@@ -712,7 +712,7 @@ class GroupedLinear(TransformerEngineBaseModule):
             if self.dump_debug_info and self.enable_cuda_graph:
                 inputmat = torch.empty(
                     4096,
-                    self.out_features,
+                    self.in_features,
                     device=device,
                     dtype=torch.bfloat16,
                 )
