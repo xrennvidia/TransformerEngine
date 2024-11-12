@@ -467,9 +467,9 @@ class _GroupedLinear(torch.autograd.Function):
                     if ctx.dump_debug_info:
                         if ctx.enable_cuda_graph:
                             for i, inputmat in enumerate(inputmats):
-                                debug_inputmats[(ctx.num_mbs % 2) * len(inputmats) + i].copy_(inputmat)
+                                debug_inputmats[(ctx.num_mbs % 2) * ctx.num_gemms + i].copy_(inputmat)
                             for i, wgrad in enumerate(wgrad_list):
-                                debug_wgrads[(ctx.num_mbs % 2) * len(wgrad_list) + i].copy_(wgrad)
+                                debug_wgrads[(ctx.num_mbs % 2) * ctx.num_gemms + i].copy_(wgrad)
                         else:
                             for i, inputmat in enumerate(inputmats):
                                 print(f"inputmat{i} {inputmat.shape} {inputmat}")
@@ -491,7 +491,7 @@ class _GroupedLinear(torch.autograd.Function):
                     if ctx.dump_debug_info:
                         if ctx.enable_cuda_graph:
                             for i, wgrad in enumerate(wgrad_list):
-                                debug_fused_wgrads[(ctx.num_mbs % 2) * len(wgrad_list) + i].copy_(wgrad)
+                                debug_fused_wgrads[(ctx.num_mbs % 2) * ctx.num_gemms + i].copy_(wgrad)
                         else:
                             for i, wgrad in enumerate(wgrad_list):
                                 print(f"fused_wgrad{i} {wgrad.shape} {wgrad}")
@@ -877,10 +877,10 @@ class GroupedLinear(TransformerEngineBaseModule):
             debug_inputmat_tensors = [getattr(self, f"debug_inputmat{i}") for i in range(2*self.num_gemms)]
             debug_wgrad_tensors = [getattr(self, f"debug_wgrad{i}") for i in range(2*self.num_gemms)]
             debug_fused_wgrad_tensors = [getattr(self, f"debug_fused_wgrad{i}") for i in range(2*self.num_gemms)]
-            debug_mbs_ids = [getattr(self, f"debug_mbs_ids{i}") for in range(2)]
-            debug_grad_acc_fusion_tensors = [getattr(self, f"debug_grad_acc_fusion{i}") for in range(2)]
-            debug_grad_input_tensors = [getattr(self, f"debug_grad_input{i}") for in range(2)]
-            debug_grad_output_tensors = [getattr(self, f"debug_grad_output{i}") for in range(2)]
+            debug_mbs_ids = [getattr(self, f"debug_mbs_ids{i}") for i in range(2)]
+            debug_grad_acc_fusion_tensors = [getattr(self, f"debug_grad_acc_fusion{i}") for i in range(2)]
+            debug_grad_input_tensors = [getattr(self, f"debug_grad_input{i}") for i in range(2)]
+            debug_grad_output_tensors = [getattr(self, f"debug_grad_output{i}") for i in range(2)]
             if not self.fp8:
                 weight_tensors = [
                     w.from_float8() if isinstance(w, Float8Tensor) else w for w in weight_tensors
