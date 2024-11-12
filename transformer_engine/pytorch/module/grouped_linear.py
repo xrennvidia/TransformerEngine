@@ -747,6 +747,7 @@ class GroupedLinear(TransformerEngineBaseModule):
                     dtype=torch.bfloat16,
                 )
             else:
+                fwd_inp = torch.Tensor().to(dtype=torch.bfloat16, device=device)
                 mbs_id = torch.Tensor().to(dtype=torch.int32, device=device)
                 grad_acc_fusion = torch.Tensor().to(dtype=torch.int32, device=device)
                 grad_input = torch.Tensor().to(dtype=torch.bfloat16, device=device)
@@ -783,6 +784,7 @@ class GroupedLinear(TransformerEngineBaseModule):
                         dtype=torch.bfloat16,
                     )
                 else:
+                    fwd_inputmat = torch.Tensor().to(dtype=torch.bfloat16, device=device)
                     inputmat = torch.Tensor().to(dtype=torch.bfloat16, device=device)
                     wgrad = torch.Tensor().to(dtype=torch.bfloat16, device=device)
                     fused_wgrad = torch.Tensor().to(dtype=torch.bfloat16, device=device)
