@@ -304,7 +304,7 @@ class _GroupedLinear(torch.autograd.Function):
             debug_mbs_ids = saved_tensors[11 * ctx.num_gemms : (11 * ctx.num_gemms + 2)]
             debug_grad_acc_fusions = saved_tensors[(11 * ctx.num_gemms + 2) : (11 * ctx.num_gemms + 4)]
             debug_grad_inputs = saved_tensors[(11 * ctx.num_gemms + 4) : (11 * ctx.num_gemms + 6)]
-            debug_grad_outputs = saved_tensors[11 * ctx.num_gemms + 6) :]
+            debug_grad_outputs = saved_tensors[(11 * ctx.num_gemms + 6) :]
 
             if ctx.dump_debug_info:
                 if ctx.enable_cuda_graph:
