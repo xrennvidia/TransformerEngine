@@ -730,7 +730,7 @@ class GroupedLinear(TransformerEngineBaseModule):
             device=device,
             dtype=torch.bfloat16,
         )
-        for i in range(self.num_gemms)
+        for i in range(self.num_gemms):
             fwd_inputmat = torch.empty(
                 4096,
                 self.out_features,
