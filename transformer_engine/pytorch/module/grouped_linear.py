@@ -298,13 +298,13 @@ class _GroupedLinear(torch.autograd.Function):
             weights = saved_tensors[2 * ctx.num_gemms : 3 * ctx.num_gemms]
             weights_fp8 = saved_tensors[3 * ctx.num_gemms : 4 * ctx.num_gemms]
             main_grads = saved_tensors[4 * ctx.num_gemms : 5 * ctx.num_gemms]
-            debug_inputmats = saved_tensors[5 * ctx.num_gemms : 6 * ctx.num_gemms]
-            debug_wgrads = saved_tensors[6 * ctx.num_gemms : 7 * ctx.num_gemms]
-            debug_fused_wgrads = saved_tensors[7 * ctx.num_gemms : 8 * ctx.num_gemms]
-            debug_mbs_ids = saved_tensors[8 * ctx.num_gemms : (8 * ctx.num_gemms + 2)]
-            debug_grad_acc_fusions = saved_tensors[(8 * ctx.num_gemms + 2) : (8 * ctx.num_gemms + 4)]
-            debug_grad_inputs = saved_tensors[(8 * ctx.num_gemms + 4) : (8 * ctx.num_gemms + 6)]
-            debug_grad_outputs = saved_tensors[(8 * ctx.num_gemms + 6) :]
+            debug_inputmats = saved_tensors[5 * ctx.num_gemms : 7 * ctx.num_gemms]
+            debug_wgrads = saved_tensors[7 * ctx.num_gemms : 9 * ctx.num_gemms]
+            debug_fused_wgrads = saved_tensors[9 * ctx.num_gemms : 11 * ctx.num_gemms]
+            debug_mbs_ids = saved_tensors[11 * ctx.num_gemms : (11 * ctx.num_gemms + 2)]
+            debug_grad_acc_fusions = saved_tensors[(11 * ctx.num_gemms + 2) : (11 * ctx.num_gemms + 4)]
+            debug_grad_inputs = saved_tensors[(11 * ctx.num_gemms + 4) : (11 * ctx.num_gemms + 6)]
+            debug_grad_outputs = saved_tensors[11 * ctx.num_gemms + 6) :]
 
             if ctx.dump_debug_info:
                 if ctx.enable_cuda_graph:
