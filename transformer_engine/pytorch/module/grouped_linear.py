@@ -85,7 +85,7 @@ class _GroupedLinear(torch.autograd.Function):
         num_mbs: int,
         dump_debug_info: bool,
         enable_cuda_graph: bool,
-        debug_fwd_inp: Union[Float8Tensor, None],
+        debug_fwd_inps: List[Union[Float8Tensor, None]],
         debug_fwd_inputmats: List[Union[Float8Tensor, None]],
         debug_mbs_ids: List[Union[torch.Tensor, None]],
         debug_grad_acc_fusions: List[Union[Float8Tensor, None]],
@@ -103,7 +103,7 @@ class _GroupedLinear(torch.autograd.Function):
 
         if dump_debug_info:
             if enable_cuda_graph:
-                debug_fwd_inp.copy_(inp)
+                debug_fwd_inps[num_mbs % 2].copy_(inp)
             else:
                 print(f"fwd_inp {inp.shape} {inp}")
 
@@ -157,7 +157,7 @@ class _GroupedLinear(torch.autograd.Function):
         if dump_debug_info:
             for i in range(num_gemms):
                 if enable_cuda_graph:
-                    debug_fwd_inputmats[i].copy_(inputmats[i])
+                    debug_fwd_inputmats[(num_mbs % 2) * num_gemms + i].copy_(inputmats[i])
                 else:
                     print(f"fwd_inputmat{i} {inputmats[i].shape} {inputmats[i]}")
 
@@ -577,7 +577,7 @@ class _GroupedLinear(torch.autograd.Function):
             None,  # num_mbs
             None,  # dump_debug_info
             None,  # enable_cuda_graph
-            None,  # debug_fwd_inp
+            None,  # debug_fwd_inps
             None,  # debug_fwd_inputmats
             None,  # debug_mbs_ids
             None,  # debug_grad_acc_fusion
@@ -724,22 +724,14 @@ class GroupedLinear(TransformerEngineBaseModule):
         self.sequence_parallel = (self.tp_size > 1) and sequence_parallel
 
         self.num_mbs = 0
-        self.debug_fwd_inp = torch.empty(
-            8192,
-            self.in_features,
-            device=device,
-            dtype=torch.bfloat16,
-        )
-        for i in range(self.num_gemms):
-            fwd_inputmat = torch.empty(
-                4096,
-                self.in_features,
-                device=device,
-                dtype=torch.bfloat16,
-            )
-            setattr(self, f"debug_fwd_inputmat{i}", fwd_inputmat)
         for i in range(2):
             if self.dump_debug_info and self.enable_cuda_graph:
+                fwd_inp = torch.empty(
+                    8192,
+                    self.in_features,
+                    device=device,
+                    dtype=torch.bfloat16,
+                )
                 mbs_id = torch.zeros(1, device=device, dtype=torch.int32)
                 grad_acc_fusion = torch.zeros(1, device=device, dtype=torch.int32)
                 grad_input = torch.empty(
@@ -759,12 +751,19 @@ class GroupedLinear(TransformerEngineBaseModule):
                 grad_acc_fusion = torch.Tensor().to(dtype=torch.int32, device=device)
                 grad_input = torch.Tensor().to(dtype=torch.bfloat16, device=device)
                 grad_output = torch.Tensor().to(dtype=torch.bfloat16, device=device)
+            setattr(self, f"debug_fwd_inp{i}", fwd_inp)
             setattr(self, f"debug_mbs_ids{i}", mbs_id)
             setattr(self, f"debug_grad_acc_fusion{i}", grad_acc_fusion)
             setattr(self, f"debug_grad_input{i}", grad_input)
             setattr(self, f"debug_grad_output{i}", grad_output)
             for j in range(self.num_gemms):
                 if self.dump_debug_info and self.enable_cuda_graph:
+                    fwd_inputmat = torch.empty(
+                        4096,
+                        self.in_features,
+                        device=device,
+                        dtype=torch.bfloat16,
+                    )
                     inputmat = torch.empty(
                         4096,
                         self.in_features,
@@ -787,6 +786,7 @@ class GroupedLinear(TransformerEngineBaseModule):
                     inputmat = torch.Tensor().to(dtype=torch.bfloat16, device=device)
                     wgrad = torch.Tensor().to(dtype=torch.bfloat16, device=device)
                     fused_wgrad = torch.Tensor().to(dtype=torch.bfloat16, device=device)
+                setattr(self, f"debug_fwd_inputmat{i * self.num_gemms + j}", fwd_inputmat)
                 setattr(self, f"debug_inputmat{i * self.num_gemms + j}", inputmat)
                 setattr(self, f"debug_wgrad{i * self.num_gemms + j}", wgrad)
                 setattr(self, f"debug_fused_wgrad{i * self.num_gemms + j}", fused_wgrad)
@@ -905,10 +905,11 @@ class GroupedLinear(TransformerEngineBaseModule):
 
             weight_tensors = [getattr(self, f"weight{i}") for i in range(self.num_gemms)]
             bias_tensors = [getattr(self, f"bias{i}") for i in range(self.num_gemms)]
-            debug_fwd_inputmat_tensors = [getattr(self, f"debug_fwd_inputmat{i}") for i in range(self.num_gemms)]
+            debug_fwd_inputmat_tensors = [getattr(self, f"debug_fwd_inputmat{i}") for i in range(2*self.num_gemms)]
             debug_inputmat_tensors = [getattr(self, f"debug_inputmat{i}") for i in range(2*self.num_gemms)]
             debug_wgrad_tensors = [getattr(self, f"debug_wgrad{i}") for i in range(2*self.num_gemms)]
             debug_fused_wgrad_tensors = [getattr(self, f"debug_fused_wgrad{i}") for i in range(2*self.num_gemms)]
+            debug_fwd_inp_tensors = [getattr(self, f"debug_fwd_inp{i}") for i in range(2)]
             debug_mbs_ids = [getattr(self, f"debug_mbs_ids{i}") for i in range(2)]
             debug_grad_acc_fusion_tensors = [getattr(self, f"debug_grad_acc_fusion{i}") for i in range(2)]
             debug_grad_input_tensors = [getattr(self, f"debug_grad_input{i}") for i in range(2)]
@@ -981,7 +982,7 @@ class GroupedLinear(TransformerEngineBaseModule):
                 self.num_mbs,
                 self.dump_debug_info,
                 self.enable_cuda_graph,
-                self.debug_fwd_inp,
+                debug_fwd_inp_tensors,
                 debug_fwd_inputmat_tensors,
                 debug_mbs_ids,
                 debug_grad_acc_fusion_tensors,
