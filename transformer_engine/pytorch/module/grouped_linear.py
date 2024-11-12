@@ -726,14 +726,14 @@ class GroupedLinear(TransformerEngineBaseModule):
         self.num_mbs = 0
         self.debug_fwd_inp = torch.empty(
             8192,
-            self.out_features,
+            self.in_features,
             device=device,
             dtype=torch.bfloat16,
         )
         for i in range(self.num_gemms):
             fwd_inputmat = torch.empty(
                 4096,
-                self.out_features,
+                self.in_features,
                 device=device,
                 dtype=torch.bfloat16,
             )
