@@ -117,7 +117,7 @@ void nvte_multi_stream_cublas_gemm(const NVTETensor* A, const NVTETensor* B, NVT
  */
 namespace transformer_engine {
 
-constexpr int num_streams = 4;
+constexpr int num_streams = 1;
 
 }  // namespace transformer_engine
 
