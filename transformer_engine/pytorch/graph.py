@@ -239,7 +239,7 @@ def _make_graphed_callables(
                     args = sample_args[per_callable_fwd_idx]
                     kwargs = sample_kwargs[per_callable_fwd_idx]
                     fwd_graph = fwd_graphs[per_callable_fwd_idx]
-                    with torch.cuda.graph(fwd_graph, pool=mempool):
+                    with torch.cuda.graph(fwd_graph, pool=graph_pool_handle()):
                         outputs = func(*args, **kwargs)
                     flatten_outputs, spec = _tree_flatten(outputs)
                     per_callable_static_outputs[per_callable_fwd_idx] = tuple(flatten_outputs)
@@ -260,7 +260,7 @@ def _make_graphed_callables(
                     static_grad_outputs = tuple(
                         torch.empty_like(o) if o.requires_grad else None for o in static_outputs
                     )
-                    with torch.cuda.graph(bwd_graph, pool=mempool):
+                    with torch.cuda.graph(bwd_graph, pool=graph_pool_handle()):
                         grad_inputs = torch.autograd.grad(
                             outputs=tuple(o for o in static_outputs if o.requires_grad),
                             inputs=tuple(i for i in static_input_surface if i.requires_grad),
@@ -290,7 +290,7 @@ def _make_graphed_callables(
         per_callable_output_unflatten_spec = []
         graph_id = 0
         for func, args, kwargs, fwd_graph in zip(callables, sample_args, sample_kwargs, fwd_graphs):
-            with torch.cuda.graph(fwd_graph, pool=mempool):
+            with torch.cuda.graph(fwd_graph, pool=graph_pool_handle()):
                 outputs = func(*args, **kwargs)
             graph_callables[graph_id] = func
             graph_id += 1
@@ -311,7 +311,7 @@ def _make_graphed_callables(
             static_grad_outputs = tuple(
                 torch.empty_like(o) if o.requires_grad else None for o in static_outputs
             )
-            with torch.cuda.graph(bwd_graph, pool=mempool):
+            with torch.cuda.graph(bwd_graph, pool=graph_pool_handle()):
                 grad_inputs = torch.autograd.grad(
                     outputs=tuple(o for o in static_outputs if o.requires_grad),
                     inputs=tuple(i for i in static_input_surface if i.requires_grad),
