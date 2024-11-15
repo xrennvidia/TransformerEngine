@@ -85,7 +85,7 @@ class _GroupedLinear(torch.autograd.Function):
         num_mbs: int,
         dump_debug_info: bool,
         enable_cuda_graph: bool,
-        debug_saved_inputs: List[Union[Float8Tensor, None]],
+        #debug_saved_inputs: List[Union[Float8Tensor, None]],
         debug_fwd_inps: List[Union[Float8Tensor, None]],
         debug_fwd_inputmats: List[Union[Float8Tensor, None]],
         debug_mbs_ids: List[Union[torch.Tensor, None]],
@@ -255,8 +255,8 @@ class _GroupedLinear(torch.autograd.Function):
                         if t is not None:
                             t.activation_offloading = True
 
-            debug_saved_inputs[(num_mbs % 6) * 2] = saved_inputmats[0]
-            debug_saved_inputs[(num_mbs % 6) * 2 + 1] = saved_inputmats[1]
+            #debug_saved_inputs[(num_mbs % 6) * 2] = saved_inputmats[0]
+            #debug_saved_inputs[(num_mbs % 6) * 2 + 1] = saved_inputmats[1]
 
             ctx.save_for_backward(
                 fp8_meta["scaling_fwd"].scale_inv.clone() if fp8 else None,
@@ -581,7 +581,7 @@ class _GroupedLinear(torch.autograd.Function):
             None,  # num_mbs
             None,  # dump_debug_info
             None,  # enable_cuda_graph
-            None,  # debug_saved_inputs
+            #None,  # debug_saved_inputs
             None,  # debug_fwd_inps
             None,  # debug_fwd_inputmats
             None,  # debug_mbs_ids
@@ -729,7 +729,7 @@ class GroupedLinear(TransformerEngineBaseModule):
         self.sequence_parallel = (self.tp_size > 1) and sequence_parallel
 
         self.num_mbs = 0
-        self.debug_saved_inputs = [None] * 6 * self.num_gemms
+        #self.debug_saved_inputs = [None] * 6 * self.num_gemms
         for i in range(2):
             if self.dump_debug_info and self.enable_cuda_graph:
                 fwd_inp = torch.empty(
@@ -990,7 +990,7 @@ class GroupedLinear(TransformerEngineBaseModule):
                 self.num_mbs,
                 self.dump_debug_info,
                 self.enable_cuda_graph,
-                self.debug_saved_inputs,
+                #self.debug_saved_inputs,
                 debug_fwd_inp_tensors,
                 debug_fwd_inputmat_tensors,
                 debug_mbs_ids,
