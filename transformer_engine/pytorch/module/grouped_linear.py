@@ -111,7 +111,8 @@ class _GroupedLinear(torch.autograd.Function):
         # Make sure input dimensions are compatible
         in_features = weights[0].shape[-1]
         assert inp.shape[-1] == in_features, "GEMM not possible"
-        inputmats = torch.split(inp.view(-1, in_features), m_splits)
+        inp = inp.view(-1, in_features)
+        inputmats = torch.split(inp, m_splits)
         if fp8:
             for i in range(num_gemms):
                 assert_dim_for_fp8_exec(inputmats[i])
@@ -259,6 +260,7 @@ class _GroupedLinear(torch.autograd.Function):
             #debug_saved_inputs[(num_mbs % 6) * 2 + 1] = saved_inputmats[1]
 
             ctx.save_for_backward(
+                inp,
                 fp8_meta["scaling_fwd"].scale_inv.clone() if fp8 else None,
                 *saved_inputmats,
                 *saved_inputmats_t,
@@ -309,6 +311,7 @@ class _GroupedLinear(torch.autograd.Function):
     def backward(ctx, grad_output: torch.Tensor) -> Tuple[Union[torch.Tensor, None], ...]:
         with torch.cuda.nvtx.range("_GroupedLinear_backward"):
             (
+                inp,
                 fwd_scale_inverses,
                 *saved_tensors,
             ) = ctx.saved_tensors
@@ -324,6 +327,9 @@ class _GroupedLinear(torch.autograd.Function):
             debug_grad_acc_fusions = saved_tensors[(11 * ctx.num_gemms + 2) : (11 * ctx.num_gemms + 4)]
             debug_grad_inputs = saved_tensors[(11 * ctx.num_gemms + 4) : (11 * ctx.num_gemms + 6)]
             debug_grad_outputs = saved_tensors[(11 * ctx.num_gemms + 6) :]
+
+            inputmats = torch.split(inp, ctx.m_splits)
+            inputmats = [cast_if_needed(mat, ctx.activation_dtype) for mat in inputmats]
 
             if ctx.dump_debug_info:
                 if ctx.enable_cuda_graph:
