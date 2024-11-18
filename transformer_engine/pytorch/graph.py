@@ -61,6 +61,8 @@ def _make_graphed_callables(
     fp8_weight_caching: bool = False,
     sample_kwargs: Optional[SingleOrTuple[Dict[str, Any]]] = None,
     _order: Optional[List[int]] = None,
+    dump_debug_info: bool = False,
+    graph_dump_path: str = None,
 ) -> SingleOrTuple[Callable]:
     """
     Helper method for `make_graphed_callables`
@@ -185,6 +187,11 @@ def _make_graphed_callables(
     fwd_graphs = [torch.cuda.CUDAGraph() for _ in range(len(flatten_sample_args))]
     bwd_graphs = [torch.cuda.CUDAGraph() for _ in range(len(flatten_sample_args))]
     graph_callables = [None for _ in range(len(flatten_sample_args))]
+
+    if dump_debug_info:
+        for fwd_graph, bwd_graph in zip(fwd_graphs, bwd_graphs):
+            fwd_graph.enable_debug_mode()
+            bwd_graph.enable_debug_mode()
 
     # For cases with multiple active RNG states, e.g. TP.
     if graph_safe_rng_available():
@@ -339,6 +346,11 @@ def _make_graphed_callables(
         per_callable_static_grad_outputs = list(reversed(per_callable_static_grad_outputs))
         per_callable_static_grad_inputs = list(reversed(per_callable_static_grad_inputs))
     # Now for every per_callable list, per_callable_*[i] holds the stuff for the ith callable.
+
+    if dump_debug_info:
+        for fwd_graph, bwd_graph in zip(fwd_graphs, bwd_graphs):
+            fwd_graph.debug_dump(graph_dump_path)
+            bwd_graph.debug_dump(graph_dump_path)
 
     def make_graphed_autograd_function(
         fwd_graph,
@@ -518,6 +530,8 @@ def make_graphed_callables(
     fp8_recipe: Optional[DelayedScaling] = None,
     fp8_weight_caching: bool = False,
     _order: Optional[List[int]] = None,
+    dump_debug_info: bool = False,
+    graph_dump_path: str = None,
 ) -> Union[Callable, Tuple[Callable, ...]]:
     """
     Make CUDA graph version of Transformer Engine modules
@@ -617,6 +631,8 @@ def make_graphed_callables(
         fp8_weight_caching=fp8_weight_caching,
         sample_kwargs=sample_kwargs,
         _order=_order,
+        dump_debug_info=dump_debug_info,
+        graph_dump_path=graph_dump_path,
     )
 
     # Ensures warmup does not affect numerics for ops such as dropout.
