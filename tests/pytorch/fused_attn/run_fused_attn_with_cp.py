@@ -11,16 +11,24 @@ from transformer_engine.pytorch.attention import get_cu_seqlens_on_cp_rank
 import transformer_engine_torch as tex
 from test_fused_attn_with_cp import model_configs_flash_attn, model_configs_fused_attn
 from transformer_engine.pytorch.fp8 import fp8_autocast
+from transformer_engine.pytorch.float8_tensor import Float8Tensor
 from transformer_engine.common.recipe import DelayedScaling
 
 dtypes = {"fp16": torch.float16, "bf16": torch.bfloat16, "fp8": torch.bfloat16}
 
 
 def run_dpa_with_cp(
-    dtype="bf16", model=None, qkv_format="bshd", kernel_backend="FlashAttention", cp_comm_type="p2p"
+    dtype="bf16",
+    model=None,
+    qkv_format="bshd",
+    kernel_backend="FlashAttention",
+    cp_comm_type="p2p",
+    fp8_mha=False,
 ):
     """Test DotProductAttention module with context parallelism"""
 
+    # args are passed as strings
+    fp8_mha = fp8_mha == "True"
     os.environ["NVTE_FLASH_ATTN"] = "0"
     os.environ["NVTE_FUSED_ATTN"] = "0"
     if kernel_backend == "FlashAttention":
@@ -59,9 +67,20 @@ def run_dpa_with_cp(
     cp_comm_ranks = range(world_size)
     assert rank in cp_comm_ranks
     cp_comm_group = dist.new_group(cp_comm_ranks, backend="nccl")
+    if cp_comm_type == "a2a+p2p":
+        assert (
+            world_size % 2 == 0
+        ), "Assuming CP size for A2A is 2, and CP size for P2P is (world_size // 2)!"
+        cp_comm_sub_ranks = [range(i * 2, (i + 1) * 2) for i in range(world_size // 2)]
+        cp_comm_sub_ranks += [range(i, world_size, 2) for i in range(2)]
+        cp_comm_sub_groups = []
+        for sub_ranks in cp_comm_sub_ranks:
+            sub_group = dist.new_group(sub_ranks, backend="nccl")
+            if rank in sub_ranks:
+                cp_comm_sub_groups.append(sub_group)
 
     if dtype == "fp8":
-        fp8_recipe = DelayedScaling(fp8_dpa=True)
+        fp8_recipe = DelayedScaling(fp8_dpa=True, fp8_mha=fp8_mha)
 
     # instantiate core attn module
     core_attn = DotProductAttention(
@@ -167,13 +186,6 @@ def run_dpa_with_cp(
     else:
         bias = None
 
-    # make sure all GPU ranks have same inputs
-    for x in [q, k, v, dout] + ([] if bias is None else [bias]):
-        dist.broadcast(x, 0, group=cp_comm_group)
-    if qkv_format == "thd":
-        for x in [cu_seqlens_q, cu_seqlens_q_padded, cu_seqlens_kv, cu_seqlens_kv_padded]:
-            dist.broadcast(x, 0, group=cp_comm_group)
-
     # run core_attn without CP
     for x in [q, k, v]:
         x.requires_grad = True
@@ -197,7 +209,11 @@ def run_dpa_with_cp(
                 None if cu_seqlens_kv_padded is None else cu_seqlens_kv_padded[:-1]
             ),
         )
-        out.backward(dout)
+        if fp8_mha:
+            dout_fp8 = Float8Tensor.to_float8(dout, fp8_dtype=tex.DType.kFloat8E5M2)
+            out.backward(dout_fp8)
+        else:
+            out.backward(dout)
 
     # run core_attn wit CP
     q_, k_, v_, dout_, *rest = [
@@ -239,7 +255,10 @@ def run_dpa_with_cp(
         bias_ = bias_.index_select(2, seq_idx)
         bias_ = bias_.view(*bias_.shape[:2], -1, bias_.shape[-1])
     core_attn.set_context_parallel_group(
-        cp_comm_group, cp_comm_ranks, torch.cuda.Stream(), cp_comm_type
+        cp_comm_sub_groups if cp_comm_type == "a2a+p2p" else cp_comm_group,
+        cp_comm_ranks,
+        torch.cuda.Stream(),
+        cp_comm_type,
     )
 
     if dtype == "fp8":
@@ -262,7 +281,11 @@ def run_dpa_with_cp(
                 None if cu_seqlens_kv_padded is None else cu_seqlens_kv_padded[:-1]
             ),
         )
-        out_.backward(dout_)
+        if fp8_mha:
+            dout_fp8_ = Float8Tensor.to_float8(dout_, fp8_dtype=tex.DType.kFloat8E5M2)
+            out_.backward(dout_fp8_)
+        else:
+            out_.backward(dout_)
 
     for x in [out_, q_.grad, k_.grad, v_.grad]:
         assert torch.all(~torch.isnan(x))

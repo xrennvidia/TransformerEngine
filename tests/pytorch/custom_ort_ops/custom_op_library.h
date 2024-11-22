@@ -4,11 +4,15 @@
  * See LICENSE for license information.
  ************************************************************************/
 
-namespace cudnn_frontend {
+#pragma once
+#include "onnxruntime/core/session/onnxruntime_c_api.h"
 
-// This is needed to define the symbol `cudnn_dlhandle`
-// When using the flag NV_CUDNN_FRONTEND_USE_DYNAMIC_LOADING
-// to enable dynamic loading.
-void *cudnn_dlhandle = nullptr;
+#ifdef __cplusplus
+extern "C" {
+#endif
 
-}  // namespace cudnn_frontend
+ORT_EXPORT OrtStatus* ORT_API_CALL RegisterCustomOps(OrtSessionOptions* options, const OrtApiBase* api);
+
+#ifdef __cplusplus
+}
+#endif
