@@ -4683,6 +4683,10 @@ class AttnFuncWithCPAndQKVOA2A(torch.autograd.Function):
                     dout_part, fake_dtype=dout_dtype, internal=True
                 )
 
+            if torch.distributed.get_rank() == 0:
+                print(f"A2A fp8: {ctx.fp8}, is_input_fp8: {ctx.is_input_fp8}, is_output_fp8: {ctx.is_output_fp8},qkv_dtype: {ctx.qkv_dtype}, fused_dqkv_dtype: {fused_attn_dqkv_dtype}, qkv_layout: {qkv_layout}, fused_attn_backend: {fused_attn_backend}")
+                print(f"A2A q_part: {isinstance(q_part, Float8Tensor)}, k_part: {isinstance(k_part, Float8Tensor)}, v_part: {isinstance(v_part, Float8Tensor)}, out_part: {isinstance(out_part, Float8Tensor)}, dout_part: {isinstance(dout_part, Float8Tensor)}")
+                print(f"A2A q_part.dtype: {q_part._fp8_dtype} {q_part._data.dtype}, k_part.dtype: {k_part._fp8_dtype} {k_part._data.dtype}, v_part.dtype: {v_part._fp8_dtype} {v_part._data.dtype}, out_part.dtype: {out_part._fp8_dtype} {out_part._data.dtype}, dout_part.dtype: {dout_part._fp8_dtype} {dout_part._data.dtype}")
             dq, dk, dv, _ = fused_attn_bwd(
                 ctx.max_seqlen_q,
                 ctx.max_seqlen_kv,
@@ -4708,6 +4712,9 @@ class AttnFuncWithCPAndQKVOA2A(torch.autograd.Function):
                 deterministic=ctx.deterministic,
                 **fp8_meta_kwargs,
             )
+            if torch.distributed.get_rank() == 0:
+                print(f"A2A dq: {isinstance(dq, Float8Tensor)}, dk: {isinstance(dk, Float8Tensor)}, dv: {isinstance(dv, Float8Tensor)}")
+                print(f"A2A dq.dtype: {dq.dtype} {dq._fp8_dtype} {dq._data.dtype}, dk.dtype: {dk.dtype} {dk._fp8_dtype} {dk._data.dtype}, dv.dtype: {dv.dtype} {dv._fp8_dtype} {dv._data.dtype}")
             if ctx.fp8:
                 dq = dq._data
                 dk = dk._data
@@ -6364,6 +6371,10 @@ class FusedAttnFunc(torch.autograd.Function):
                         d_out_fp8 = d_out
                     else:
                         d_out_fp8 = ctx.dO_quantizer(d_out)
+                    if torch.distributed.get_rank() == 0:
+                        print(f"fp8: {ctx.fp8}, is_input_fp8: {ctx.is_input_fp8}, is_output_fp8: {ctx.is_output_fp8}, fake_dtype: {ctx.fake_dtype}, qkv_dtype: {ctx.qkv_dtype}, qkv_layout: {ctx.qkv_layout}, fused_attention_backend: {ctx.fused_attention_backend}")
+                        print(f"q_fp8: {isinstance(q_fp8, Float8Tensor)}, k_fp8: {isinstance(k_fp8, Float8Tensor)}, v_fp8: {isinstance(v_fp8, Float8Tensor)}, out_fp8: {isinstance(out_fp8, Float8Tensor)}, d_out_fp8: {isinstance(d_out_fp8, Float8Tensor)}")
+                        print(f"q_fp8.dtype: {q_fp8._fp8_dtype} {q_fp8._data.dtype}, k_fp8.dtype: {k_fp8._fp8_dtype} {k_fp8._data.dtype}, v_fp8.dtype: {v_fp8._fp8_dtype} {v_fp8._data.dtype}, out_fp8.dtype: {out_fp8._fp8_dtype} {out_fp8._data.dtype}, d_out_fp8.dtype: {d_out_fp8._fp8_dtype} {d_out_fp8._data.dtype}")
                     dq_fp8, dk_fp8, dv_fp8, *rest = fused_attn_bwd(
                         ctx.max_seqlen_q,
                         ctx.max_seqlen_kv,
@@ -6392,6 +6403,9 @@ class FusedAttnFunc(torch.autograd.Function):
                         ctx.window_size,
                         ctx.deterministic,
                     )
+                    if torch.distributed.get_rank() == 0:
+                        print(f"dq_fp8: {isinstance(dq_fp8, Float8Tensor)}, dk_fp8: {isinstance(dk_fp8, Float8Tensor)}, dv_fp8: {isinstance(dv_fp8, Float8Tensor)}")
+                        print(f"dq_fp8.dtype: {dq_fp8.dtype} {dq_fp8._fp8_dtype} {dq_fp8._data.dtype}, dk_fp8.dtype: {dk_fp8.dtype} {dk_fp8._fp8_dtype} {dk_fp8._data.dtype}, dv_fp8.dtype: {dv_fp8.dtype} {dv_fp8._fp8_dtype} {dv_fp8._data.dtype}")
 
                     if not ctx.is_input_fp8:
                         qkv_group = len(ctx.qkv_layout.split("_"))
