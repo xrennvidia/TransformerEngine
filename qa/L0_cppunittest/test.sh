@@ -1,4 +1,4 @@
-# Copyright (c) 2022-2024, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# Copyright (c) 2022-2025, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 #
 # See LICENSE for license information.
 
@@ -6,7 +6,7 @@ set -e
 
 # Find TE
 : ${TE_PATH:=/opt/transformerengine}
-TE_LIB_PATH=`pip show transformer-engine | grep Location | cut -d ' ' -f 2`
+TE_LIB_PATH=`pip3 show transformer-engine | grep Location | cut -d ' ' -f 2`
 export LD_LIBRARY_PATH=$TE_LIB_PATH:$LD_LIBRARY_PATH
 
 cd $TE_PATH/tests/cpp

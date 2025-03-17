@@ -1,20 +1,20 @@
-# Copyright (c) 2022-2024, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# Copyright (c) 2022-2025, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 #
 # See LICENSE for license information.
 """JAX/TE custom ops for activation"""
 from typing import Tuple, Sequence, Union, Callable
 import operator
 from functools import reduce, partial
+from packaging import version
 
 import jax
 import jax.numpy as jnp
-from jax import core, dtypes
+from jax import dtypes
 from jax.interpreters.mlir import ir
 from jax.sharding import PartitionSpec, NamedSharding
-from jax.extend import ffi
 
-from transformer_engine import transformer_engine_jax
-from transformer_engine.transformer_engine_jax import NVTE_Activation_Type
+import transformer_engine_jax
+from transformer_engine_jax import NVTE_Activation_Type
 
 from .base import BasePrimitive, register_primitive
 from .custom_call import custom_caller, CustomCallArgsWrapper
@@ -27,6 +27,11 @@ from .misc import (
 )
 from .quantization import _jax_cast_fp8
 from ..sharding import all_reduce_max_along_all_axes_except_PP
+
+if version.parse(jax.__version__) >= version.parse("0.5.0"):
+    from jax import ffi  # pylint: disable=ungrouped-imports
+else:
+    from jax.extend import ffi  # pylint: disable=ungrouped-imports
 
 
 __all__ = ["act_lu", "dact_lu", "act_lu_fp8"]
@@ -98,7 +103,7 @@ class ActLuPrimitive(BasePrimitive):
         assert x_shape[-2] == 2 or x_shape[-2] == 1
         hidden_size = x_shape[-1]
         batch_shapes = x_shape[:-2]
-        out_aval = core.raise_to_shaped(x_aval)
+        out_aval = x_aval
         out_shape = (batch_shapes) + (hidden_size,)
         out_aval = out_aval.update(shape=out_shape, dtype=dtype)
 
@@ -225,7 +230,7 @@ class DActLuPrimitive(BasePrimitive):
         i_hidden_size = dz_aval.shape[-1]
         g_hidden_size = x_aval.shape[-1]
         assert i_hidden_size == g_hidden_size
-        out_aval = core.raise_to_shaped(x_aval)
+        out_aval = x_aval
 
         return out_aval
 

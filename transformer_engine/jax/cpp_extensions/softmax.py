@@ -1,4 +1,4 @@
-# Copyright (c) 2022-2024, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# Copyright (c) 2022-2025, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 #
 # See LICENSE for license information.
 """JAX/TE custom ops for softmax"""
@@ -6,20 +6,25 @@ from abc import abstractmethod
 from functools import partial, reduce
 import operator
 import warnings
+from packaging import version
 
 import jax
 import jax.numpy as jnp
-from jax import core, dtypes
+from jax import dtypes
 from jax.interpreters.mlir import ir
 from jax.sharding import PartitionSpec, NamedSharding
-from jax.extend import ffi
 
-from transformer_engine import transformer_engine_jax
+import transformer_engine_jax
 
 from .base import BasePrimitive, register_primitive
 from .custom_call import custom_caller, CustomCallArgsWrapper
 from .misc import get_padded_spec, check_valid_batch_dims, jax_dtype_to_te_dtype, is_ffi_enabled
 from ..softmax import SoftmaxType
+
+if version.parse(jax.__version__) >= version.parse("0.5.0"):
+    from jax import ffi  # pylint: disable=ungrouped-imports
+else:
+    from jax.extend import ffi  # pylint: disable=ungrouped-imports
 
 
 __all__ = [
@@ -126,7 +131,7 @@ class SoftmaxPrimitive(BasePrimitive):
         assert k_seqlen <= SoftmaxPrimitive.max_k_seqlen_supported
         assert q_seqlen > 1
 
-        out_aval = core.raise_to_shaped(logits_aval)
+        out_aval = logits_aval
         return out_aval
 
     @staticmethod
@@ -237,7 +242,7 @@ class SoftmaxPrimitive(BasePrimitive):
 
         assert dz_aval.shape == softmax_out_aval.shape
 
-        dx_aval = core.raise_to_shaped(dz_aval)
+        dx_aval = dz_aval
         return dx_aval
 
     @staticmethod
@@ -578,7 +583,7 @@ class ScaledMaskedSoftmaxFwdPrimitive(SoftmaxPrimitive):
         assert mask_shape[-2] == q_seqlen
         assert mask_shape[-1] == k_seqlen
 
-        out_aval = core.raise_to_shaped(logits_aval)
+        out_aval = logits_aval
         return out_aval
 
     @staticmethod

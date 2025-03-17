@@ -1,4 +1,4 @@
-# Copyright (c) 2022-2024, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# Copyright (c) 2022-2025, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 #
 # See LICENSE for license information.
 
@@ -11,7 +11,7 @@ import torch
 from torch import nn
 
 import transformer_engine as te
-from transformer_engine.pytorch.attention import RotaryPositionEmbedding
+from transformer_engine.pytorch.dot_product_attention.rope import RotaryPositionEmbedding
 from transformer_engine.pytorch.fp8 import fp8_model_init
 
 import transformers
