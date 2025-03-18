@@ -4583,7 +4583,7 @@ class FusedAttnFunc(torch.autograd.Function):
                     # q_fp8, k_fp8, v_fp8, out_fp8:      torch.float8_e4m3fn
                     # d_out_fp8, dq_fp8, dk_fp8, dv_fp8: torch.float8_e5m2
                     if torch.distributed.get_rank() == 0:
-                        print(f"CP1 fp8: {ctx.fp8}, is_input_fp8: {ctx.is_input_fp8}, is_output_fp8: {ctx.is_output_fp8}, fake_dtype: {fake_dtype}, qkv_dtype: {dqkv_dtype}, qkv_layout: {ctx.qkv_layout}, fused_attention_backend: {ctx.fused_attention_backend}")
+                        print(f"CP1 fp8: {ctx.fp8}, is_input_fp8: {ctx.is_input_fp8}, is_output_fp8: {ctx.is_output_fp8}, fake_dtype: {fake_dtype}, qkv_dtype: {dqkv_dtype}, qkv_layout: {ctx.qkv_layout}, fused_attn_backend: {ctx.fused_attention_backend}")
                         print(f"CP1 q_fp8: {isinstance(q_fp8, Float8Tensor)}, k_fp8: {isinstance(k_fp8, Float8Tensor)}, v_fp8: {isinstance(v_fp8, Float8Tensor)}, out_fp8: {isinstance(out_fp8, Float8Tensor)}, d_out_fp8: {isinstance(d_out_fp8, Float8Tensor)}")
                         print(f"CP1 q_fp8.dtype: {q_fp8._fp8_dtype} {q_fp8._data.dtype}, k_fp8.dtype: {k_fp8._fp8_dtype} {k_fp8._data.dtype}, v_fp8.dtype: {v_fp8._fp8_dtype} {v_fp8._data.dtype}, out_fp8.dtype: {out_fp8._fp8_dtype} {out_fp8._data.dtype}, d_out_fp8.dtype: {d_out_fp8._fp8_dtype} {d_out_fp8._data.dtype}")
                     dq_fp8, dk_fp8, dv_fp8, *rest = fused_attn_bwd(
