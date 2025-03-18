@@ -4536,17 +4536,19 @@ class FusedAttnFunc(torch.autograd.Function):
         ctx.use_FAv2_bwd = use_FAv2_bwd
         ctx.deterministic = deterministic
 
-        h = out_ret.shape[-2] // 2
+        h_oq = out_ret.shape[-2] // 2
         if fp8:
+            h_kv = k_fp8._data.shape[-2] // 2
             if get_distributed_rank() == 0:
-                return out_ret, aux_ctx_tensors[0][:, :h], q_fp8._data[..., :h, :], k_fp8._data[..., :h, :], v_fp8._data[..., :h, :], out_fp8._data[..., :h, :]
+                return out_ret, aux_ctx_tensors[0][:, :h_oq], q_fp8._data[..., :h_oq, :], k_fp8._data[..., :h_kv, :], v_fp8._data[..., :h_kv, :], out_fp8._data[..., :h_oq, :]
             else:
-                return out_ret, aux_ctx_tensors[0][:, h:], q_fp8._data[..., h:, :], k_fp8._data[..., h:, :], v_fp8._data[..., h:, :], out_fp8._data[..., h:, :]
+                return out_ret, aux_ctx_tensors[0][:, h_oq:], q_fp8._data[..., h_oq:, :], k_fp8._data[..., h_kv:, :], v_fp8._data[..., h_kv:, :], out_fp8._data[..., h_oq:, :]
         else:
+            h_kv = k.shape[-2] // 2
             if get_distributed_rank() == 0:
-                return out_ret, aux_ctx_tensors[0][:, :h], q[..., :h, :], k[..., :h, :], v[..., :h, :], out_ret[..., :h, :]
+                return out_ret, aux_ctx_tensors[0][:, :h_oq], q[..., :h_oq, :], k[..., :h_kv, :], v[..., :h_kv, :], out_ret[..., :h_oq, :]
             else:
-                return out_ret, aux_ctx_tensors[0][:, h:], q[..., h:, :], k[..., h:, :], v[..., h:, :], out_ret[..., h:, :]
+                return out_ret, aux_ctx_tensors[0][:, h_oq:], q[..., h_oq:, :], k[..., h_kv:, :], v[..., h_kv:, :], out_ret[..., h_oq:, :]
 
     @staticmethod
     def backward(ctx, d_out, *args):
