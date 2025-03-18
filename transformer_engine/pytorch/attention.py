@@ -4539,9 +4539,9 @@ class FusedAttnFunc(torch.autograd.Function):
         h = out_ret.shape[-2] // 2
         if fp8:
             if get_distributed_rank() == 0:
-                return out_ret, aux_ctx_tensors[0][:, :h], q_fp8[..., :h, :], k_fp8[..., :h, :], v_fp8[..., :h, :], out_fp8[..., :h, :]
+                return out_ret, aux_ctx_tensors[0][:, :h], q_fp8._data[..., :h, :], k_fp8._data[..., :h, :], v_fp8._data[..., :h, :], out_fp8._data[..., :h, :]
             else:
-                return out_ret, aux_ctx_tensors[0][:, h:], q_fp8[..., h:, :], k_fp8[..., h:, :], v_fp8[..., h:, :], out_fp8[..., h:, :]
+                return out_ret, aux_ctx_tensors[0][:, h:], q_fp8._data[..., h:, :], k_fp8._data[..., h:, :], v_fp8._data[..., h:, :], out_fp8._data[..., h:, :]
         else:
             if get_distributed_rank() == 0:
                 return out_ret, aux_ctx_tensors[0][:, :h], q[..., :h, :], k[..., :h, :], v[..., :h, :], out_ret[..., :h, :]
@@ -4623,13 +4623,15 @@ class FusedAttnFunc(torch.autograd.Function):
                     dqkv_dtype = TE_DType[d_out_fp8._data.dtype]
                     if get_distributed_rank() == 0:
                         rank = get_distributed_rank()
-                        qkv_scale = ctx.S_quantizer.scale
+                        q_scale = q_fp8._quantizer.scale
+                        k_scale = k_fp8._quantizer.scale
+                        v_scale = v_fp8._quantizer.scale
                         s_scale = ctx.S_quantizer.scale
-                        o_scale = ctx.O_quantizer.scale
+                        o_scale = out_fp8._quantizer.scale
                         dqkv_scale = ctx.dQKV_quantizer.scale
                         do_scale = ctx.dO_quantizer.scale
                         dp_scale = ctx.dP_quantizer.scale
-                        print(f"cp=1 rank_{rank} bwd {qkv_scale} {s_scale} {o_scale} {dqkv_scale} {do_scale} {dp_scale}")
+                        print(f"cp=1 rank_{rank} bwd {q_scale} {k_scale} {v_scale} {s_scale} {o_scale} {dqkv_scale} {do_scale} {dp_scale}")
 
                     # q_fp8, k_fp8, v_fp8, out_fp8:      torch.float8_e4m3fn
                     # d_out_fp8, dq_fp8, dk_fp8, dv_fp8: torch.float8_e5m2
