@@ -3315,6 +3315,7 @@ class AttnFuncWithCPAndQKVOA2A(torch.autograd.Function):
                 **fp8_meta_kwargs,
             )
             if torch.distributed.get_rank() == 0:
+                print(f"CP2 QKV_quantizer: {ctx.QKV_quantizer.scale} {ctx.QKV_quantizer.amax} {ctx.QKV_quantizer.dtype}, dQKV_quantizer: {ctx.dQKV_quantizer.scale} {ctx.dQKV_quantizer.amax} {ctx.dQKV_quantizer.dtype}, O_quantizer: {ctx.O_quantizer.scale} {ctx.O_quantizer.amax} {ctx.O_quantizer.dtype}, dO_quantizer: {ctx.dO_quantizer.scale} {ctx.dO_quantizer.amax} {ctx.dO_quantizer.dtype}, S_quantizer: {ctx.S_quantizer.scale} {ctx.S_quantizer.amax} {ctx.S_quantizer.dtype}, dP_quantizer: {ctx.dP_quantizer.scale} {ctx.dP_quantizer.amax} {ctx.dP_quantizer.dtype}")
                 print(f"CP2 dq: {isinstance(dq, Float8Tensor)}, dk: {isinstance(dk, Float8Tensor)}, dv: {isinstance(dv, Float8Tensor)}")
                 print(f"CP2 dq.dtype: {dq.dtype} {dq._fp8_dtype} {dq._data.dtype} {dq._data.shape} {dq._data.stride()}, dk.dtype: {dk.dtype} {dk._fp8_dtype} {dk._data.dtype} {dk._data.shape} {dk._data.stride()}, dv.dtype: {dv.dtype} {dv._fp8_dtype} {dv._data.dtype} {dv._data.shape} {dv._data.stride()}")
             if ctx.fp8:
@@ -4617,6 +4618,7 @@ class FusedAttnFunc(torch.autograd.Function):
                         ctx.deterministic,
                     )
                     if torch.distributed.get_rank() == 0:
+                        print(f"CP2 QKV_quantizer: {q_fp8._quantizer.scale} {q_fp8._quantizer.amax} {q_fp8._quantizer.dtype}, dQKV_quantizer: {ctx.dQKV_quantizer.scale} {ctx.dQKV_quantizer.amax} {ctx.dQKV_quantizer.dtype}, O_quantizer: {out_fp8._quantizer.scale} {out_fp8._quantizer.amax} {out_fp8._quantizer.dtype}, dO_quantizer: {ctx.dO_quantizer.scale} {ctx.dO_quantizer.amax} {ctx.dO_quantizer.dtype}, S_quantizer: {ctx.S_quantizer.scale} {ctx.S_quantizer.amax} {ctx.S_quantizer.dtype}, dP_quantizer: {ctx.dP_quantizer.scale} {ctx.dP_quantizer.amax} {ctx.dP_quantizer.dtype}, dQKV_quantizer: {ctx.dQKV_quantizer.scale} {ctx.dQKV_quantizer.amax} {ctx.dQKV_quantizer.dtype}")
                         print(f"CP1 dq_fp8: {isinstance(dq_fp8, Float8Tensor)}, dk_fp8: {isinstance(dk_fp8, Float8Tensor)}, dv_fp8: {isinstance(dv_fp8, Float8Tensor)}")
                         print(f"CP1 dq_fp8.dtype: {dq_fp8.dtype} {dq_fp8._fp8_dtype} {dq_fp8._data.dtype} {dq_fp8._data.shape} {dq_fp8._data.stride()}, dk_fp8.dtype: {dk_fp8.dtype} {dk_fp8._fp8_dtype} {dk_fp8._data.dtype} {dk_fp8._data.shape} {dk_fp8._data.stride()}, dv_fp8.dtype: {dv_fp8.dtype} {dv_fp8._fp8_dtype} {dv_fp8._data.dtype} {dv_fp8._data.shape} {dv_fp8._data.stride()}")
 
