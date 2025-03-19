@@ -4844,7 +4844,6 @@ class FusedAttnFunc(torch.autograd.Function):
                     if ctx.is_output_fp8:
                         d_out_fp8 = d_out
                     else:
-                        if torch.distributed.get_rank() == 0:
                         d_out_fp8 = ctx.dO_quantizer(d_out)
                     dqkv_dtype = TE_DType[d_out_fp8._data.dtype]
                     # q_fp8, k_fp8, v_fp8, out_fp8:      torch.float8_e4m3fn
