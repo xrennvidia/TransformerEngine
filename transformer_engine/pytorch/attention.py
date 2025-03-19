@@ -3211,6 +3211,9 @@ class AttnFuncWithCPAndQKVOA2A(torch.autograd.Function):
             else:
                 out_save = out_f16
 
+        if torch.distributed.get_rank() < cp_size and (layer_number == 1 or layer_number == 80):
+            print(f"CP2 fwd rank: {torch.distributed.get_rank()} layer: {layer_number} out.norm: {out_f16.norm()}", flush=True)
+
         tensors_to_save, tensor_objects = prepare_for_saving(
             q_save,
             k_save,
@@ -3287,6 +3290,8 @@ class AttnFuncWithCPAndQKVOA2A(torch.autograd.Function):
                     assert isinstance(dout, Float8Tensor), "dout must be Float8Tensors for FP8 MHA!"
                     ctx.dO_quantizer = dout._quantizer
                 else:
+                    if torch.distributed.get_rank() < cp_size and (ctx.layer_number == 1 or ctx.layer_number == 80):
+                        print(f"CP2 bwd rank: {torch.distributed.get_rank()} layer: {ctx.layer_number} dout.norm: {dout.norm()}", flush=True)
                     dout = ctx.dO_quantizer(dout)
                 fused_attn_dqkv_dtype = TE_DType[dout._data.dtype]
                 dout = dout._data
@@ -3476,6 +3481,8 @@ class AttnFuncWithCPAndQKVOA2A(torch.autograd.Function):
             )
             if not ctx.is_input_fp8:
                 dq, dk, dv = [x.dequantize(dtype=dout_dtype) for x in [dq, dk, dv]]
+                if torch.distributed.get_rank() < cp_size and (ctx.layer_number == 1 or ctx.layer_number == 80):
+                    print(f"CP2 bwd rank: {torch.distributed.get_rank()} layer: {ctx.layer_number} dq.norm: {dq.norm()}, dk.norm: {dk.norm()}, dv.norm: {dv.norm()}", flush=True)
         nvtx_range_pop("transformer_engine.AttnFuncWithCPAndQKVOA2A.backward")
 
         return (
@@ -4663,6 +4670,8 @@ class FusedAttnFunc(torch.autograd.Function):
             # is_output_fp8 = False: out_save.dtype = torch.float16 or torch.bfloat16
             # is_output_fp8 = True:  out_save.dtype = torch.float8_e4m3fn
             out_save = out_ret
+            if torch.distributed.get_rank() == 0 and (layer_number == 1 or layer_number == 80):
+                print(f"CP1 fwd layer: {layer_number} out.norm: {out_save.norm()}", flush=True)
 
             if not int(os.getenv("NVTE_FP8_DPA_BWD", "1")):
                 # 1: qkv packed, 2: kv packed, 3: qkv separate
@@ -4847,6 +4856,8 @@ class FusedAttnFunc(torch.autograd.Function):
                     if ctx.is_output_fp8:
                         d_out_fp8 = d_out
                     else:
+                        if torch.distributed.get_rank() == 0 and (ctx.layer_number == 1 or ctx.layer_number == 80):
+                            print(f"CP1 bwd layer: {ctx.layer_number} d_out.norm: {d_out.norm()}", flush=True)
                         d_out_fp8 = ctx.dO_quantizer(d_out)
                     dqkv_dtype = TE_DType[d_out_fp8._data.dtype]
                     # q_fp8, k_fp8, v_fp8, out_fp8:      torch.float8_e4m3fn
@@ -4915,6 +4926,8 @@ class FusedAttnFunc(torch.autograd.Function):
                             dq = dq_fp8.dequantize()
                             dk = dk_fp8.dequantize()
                             dv = dv_fp8.dequantize()
+                            if torch.distributed.get_rank() == 0 and (ctx.layer_number == 1 or ctx.layer_number == 80):
+                                print(f"CP1 bwd layer: {ctx.layer_number} dq.norm: {dq.norm()}, dk.norm: {dk.norm()}, dv.norm: {dv.norm()}", flush=True)
                     else:
                         dq, dk, dv = dq_fp8, dk_fp8, dv_fp8
                 else:
