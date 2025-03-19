@@ -3285,8 +3285,6 @@ class AttnFuncWithCPAndQKVOA2A(torch.autograd.Function):
                     assert isinstance(dout, Float8Tensor), "dout must be Float8Tensors for FP8 MHA!"
                     ctx.dO_quantizer = dout._quantizer
                 else:
-                    if get_distributed_rank(ctx.cp_group) < cp_size:
-                        print(f"CP2 bwd rank: {get_distributed_rank(ctx.cp_group)} dO.norm: {dout.norm()}")
                     dout = ctx.dO_quantizer(dout)
                 fused_attn_dqkv_dtype = TE_DType[dout._data.dtype]
                 dout = dout._data
@@ -3389,6 +3387,7 @@ class AttnFuncWithCPAndQKVOA2A(torch.autograd.Function):
                 )
 
             if get_distributed_rank(ctx.cp_group) < cp_size:
+                print(f"CP2 bwd: rank {get_distributed_rank(ctx.cp_group)}, q.norm: {q.norm()}, k.norm: {k.norm()}, v.norm: {v.norm()}, out.norm: {out.norm()}, dout.norm: {dout.norm()}")
                 print(f"CP2 bwd rank: {get_distributed_rank(ctx.cp_group)} fp8: {ctx.fp8}, is_input_fp8: {ctx.is_input_fp8}, is_output_fp8: {ctx.is_output_fp8},qkv_dtype: {ctx.qkv_dtype}, fused_dqkv_dtype: {fused_attn_dqkv_dtype}, qkv_layout: {qkv_layout}, fused_attn_backend: {fused_attn_backend}")
                 print(f"CP2 bwd rank: {get_distributed_rank(ctx.cp_group)} q_part: {isinstance(q_part, Float8Tensor)}, k_part: {isinstance(k_part, Float8Tensor)}, v_part: {isinstance(v_part, Float8Tensor)}, out_part: {isinstance(out_part, Float8Tensor)}, dout_part: {isinstance(dout_part, Float8Tensor)}")
                 print(f"CP2 bwd rank: {get_distributed_rank(ctx.cp_group)} q_part.dtype: {q_part._fp8_dtype} {q_part._data.dtype} {q_part._data.shape} {q_part._data.stride()}, k_part.dtype: {k_part._fp8_dtype} {k_part._data.dtype} {k_part._data.shape} {k_part._data.stride()}, v_part.dtype: {v_part._fp8_dtype} {v_part._data.dtype} {v_part._data.shape} {v_part._data.stride()}, out_part.dtype: {out_part._fp8_dtype} {out_part._data.dtype} {out_part._data.shape} {out_part._data.stride()}, dout_part.dtype: {dout_part._fp8_dtype} {dout_part._data.dtype} {dout_part._data.shape} {dout_part._data.stride()}")
@@ -3421,6 +3420,7 @@ class AttnFuncWithCPAndQKVOA2A(torch.autograd.Function):
                 print(f"CP2 bwd rank: {get_distributed_rank(ctx.cp_group)} QKV_quantizer: {ctx.QKV_quantizer.scale} {ctx.QKV_quantizer.amax} {ctx.QKV_quantizer.dtype}, dQKV_quantizer: {ctx.dQKV_quantizer.scale} {ctx.dQKV_quantizer.amax} {ctx.dQKV_quantizer.dtype}, O_quantizer: {ctx.O_quantizer.scale} {ctx.O_quantizer.amax} {ctx.O_quantizer.dtype}, dO_quantizer: {ctx.dO_quantizer.scale} {ctx.dO_quantizer.amax} {ctx.dO_quantizer.dtype}, S_quantizer: {ctx.S_quantizer.scale} {ctx.S_quantizer.amax} {ctx.S_quantizer.dtype}, dP_quantizer: {ctx.dP_quantizer.scale} {ctx.dP_quantizer.amax} {ctx.dP_quantizer.dtype}")
                 print(f"CP2 bwd rank: {get_distributed_rank(ctx.cp_group)} dq: {isinstance(dq, Float8Tensor)}, dk: {isinstance(dk, Float8Tensor)}, dv: {isinstance(dv, Float8Tensor)}")
                 print(f"CP2 bwd rank: {get_distributed_rank(ctx.cp_group)} dq.dtype: {dq.dtype} {dq._fp8_dtype} {dq._data.dtype} {dq._data.shape} {dq._data.stride()}, dk.dtype: {dk.dtype} {dk._fp8_dtype} {dk._data.dtype} {dk._data.shape} {dk._data.stride()}, dv.dtype: {dv.dtype} {dv._fp8_dtype} {dv._data.dtype} {dv._data.shape} {dv._data.stride()}")
+                print(f"CP2 bwd rank: {get_distributed_rank(ctx.cp_group)} dq.norm: {dq._data.norm()}, dk.norm: {dk._data.norm()}, dv.norm: {dv._data.norm()}")
             if ctx.fp8:
                 dq = dq._data
                 dk = dk._data
@@ -3476,8 +3476,6 @@ class AttnFuncWithCPAndQKVOA2A(torch.autograd.Function):
             )
             if not ctx.is_input_fp8:
                 dq, dk, dv = [x.dequantize(dtype=dout_dtype) for x in [dq, dk, dv]]
-                if get_distributed_rank(ctx.cp_group) < cp_size:
-                    print(f"CP2 bwd rank: {get_distributed_rank(ctx.cp_group)} dq.norm: {dq.norm()}, dk.norm: {dk.norm()}, dv.norm: {dv.norm()}")
         nvtx_range_pop("transformer_engine.AttnFuncWithCPAndQKVOA2A.backward")
 
         return (
@@ -4847,13 +4845,14 @@ class FusedAttnFunc(torch.autograd.Function):
                         d_out_fp8 = d_out
                     else:
                         if torch.distributed.get_rank() == 0:
-                            num_dout_heads = d_out.shape[-2]
-                            print(f"CP1 bwd dout.norm: {d_out[..., :(num_dout_heads//2), :].norm()} {d_out[..., (num_dout_heads//2):, :].norm()}")
                         d_out_fp8 = ctx.dO_quantizer(d_out)
                     dqkv_dtype = TE_DType[d_out_fp8._data.dtype]
                     # q_fp8, k_fp8, v_fp8, out_fp8:      torch.float8_e4m3fn
                     # d_out_fp8, dq_fp8, dk_fp8, dv_fp8: torch.float8_e5m2
                     if torch.distributed.get_rank() == 0:
+                        num_qo_heads = q_fp8._data.shape[-2]
+                        num_kv_heads = k_fp8._data.shape[-2]
+                        print(f"CP1 bwd q.norm: {q_fp8._data[..., :(num_qo_heads//2), :].norm()} {q_fp8._data[..., (num_qo_heads//2):, :].norm()}, k.norm: {k_fp8._data[..., :(num_kv_heads//2), :].norm()} {k_fp8._data[..., (num_kv_heads//2):, :].norm()}, v.norm: {v_fp8._data[..., :(num_kv_heads//2), :].norm()} {v_fp8._data[..., (num_kv_heads//2):, :].norm()}, out.norm: {out_fp8._data[..., :(num_qo_heads//2), :].norm()} {out_fp8._data[..., (num_qo_heads//2):, :].norm()}, d_out.norm: {d_out_fp8._data[..., :(num_qo_heads//2), :].norm()} {d_out_fp8._data[..., (num_qo_heads//2):, :].norm()}")
                         print(f"CP1 bwd fp8: {ctx.fp8}, is_input_fp8: {ctx.is_input_fp8}, is_output_fp8: {ctx.is_output_fp8}, fake_dtype: {fake_dtype}, qkv_dtype: {dqkv_dtype}, qkv_layout: {ctx.qkv_layout}, fused_attn_backend: {ctx.fused_attention_backend}")
                         print(f"CP1 bwd q_fp8: {isinstance(q_fp8, Float8Tensor)}, k_fp8: {isinstance(k_fp8, Float8Tensor)}, v_fp8: {isinstance(v_fp8, Float8Tensor)}, out_fp8: {isinstance(out_fp8, Float8Tensor)}, d_out_fp8: {isinstance(d_out_fp8, Float8Tensor)}")
                         print(f"CP1 bwd q_fp8.dtype: {q_fp8._fp8_dtype} {q_fp8._data.dtype} {q_fp8._data.shape} {q_fp8._data.stride()}, k_fp8.dtype: {k_fp8._fp8_dtype} {k_fp8._data.dtype} {k_fp8._data.shape} {k_fp8._data.stride()}, v_fp8.dtype: {v_fp8._fp8_dtype} {v_fp8._data.dtype} {v_fp8._data.shape} {v_fp8._data.stride()}, out_fp8.dtype: {out_fp8._fp8_dtype} {out_fp8._data.dtype} {out_fp8._data.shape} {out_fp8._data.stride()}, d_out_fp8.dtype: {d_out_fp8._fp8_dtype} {d_out_fp8._data.dtype} {d_out_fp8._data.shape} {d_out_fp8._data.stride()}")
@@ -4889,6 +4888,7 @@ class FusedAttnFunc(torch.autograd.Function):
                         print(f"CP1 bwd QKV_quantizer: {q_fp8._quantizer.scale} {q_fp8._quantizer.amax} {q_fp8._quantizer.dtype}, dQKV_quantizer: {ctx.dQKV_quantizer.scale} {ctx.dQKV_quantizer.amax} {ctx.dQKV_quantizer.dtype}, O_quantizer: {out_fp8._quantizer.scale} {out_fp8._quantizer.amax} {out_fp8._quantizer.dtype}, dO_quantizer: {ctx.dO_quantizer.scale} {ctx.dO_quantizer.amax} {ctx.dO_quantizer.dtype}, S_quantizer: {ctx.S_quantizer.scale} {ctx.S_quantizer.amax} {ctx.S_quantizer.dtype}, dP_quantizer: {ctx.dP_quantizer.scale} {ctx.dP_quantizer.amax} {ctx.dP_quantizer.dtype}")
                         print(f"CP1 bwd dq_fp8: {isinstance(dq_fp8, Float8Tensor)}, dk_fp8: {isinstance(dk_fp8, Float8Tensor)}, dv_fp8: {isinstance(dv_fp8, Float8Tensor)}")
                         print(f"CP1 bwd dq_fp8.dtype: {dq_fp8.dtype} {dq_fp8._fp8_dtype} {dq_fp8._data.dtype} {dq_fp8._data.shape} {dq_fp8._data.stride()}, dk_fp8.dtype: {dk_fp8.dtype} {dk_fp8._fp8_dtype} {dk_fp8._data.dtype} {dk_fp8._data.shape} {dk_fp8._data.stride()}, dv_fp8.dtype: {dv_fp8.dtype} {dv_fp8._fp8_dtype} {dv_fp8._data.dtype} {dv_fp8._data.shape} {dv_fp8._data.stride()}")
+                        print(f"CP1 bwd dq.norm: {dq_fp8._data[..., :(num_qo_heads//2), :].norm()} {dq_fp8._data[..., (num_qo_heads//2):, :].norm()}, dk.norm: {dk_fp8._data[..., :(num_kv_heads//2), :].norm()} {dk_fp8._data[..., (num_kv_heads//2):, :].norm()}, dv.norm: {dv_fp8._data[..., :(num_kv_heads//2), :].norm()} {dv_fp8._data[..., (num_kv_heads//2):, :].norm()}")
 
                     # is_input_fp8 = False: dq, dk, dv: torch.float16 or torch.bfloat16
                     # is_input_fp8 = True:  dq, dk, dv: torch.float8_e5m2
@@ -4917,10 +4917,6 @@ class FusedAttnFunc(torch.autograd.Function):
                             dq = dq_fp8.dequantize()
                             dk = dk_fp8.dequantize()
                             dv = dv_fp8.dequantize()
-                            if torch.distributed.get_rank() == 0:
-                                num_dq_heads = dq.shape[-2]
-                                num_dkv_heads = dk.shape[-2]
-                                print(f"CP1 bwd dq.norm: {dq[..., :(num_dq_heads//2), :].norm()} {dq[..., (num_dq_heads//2):, :].norm()}, dk.norm: {dk[..., :(num_dkv_heads//2), :].norm()} {dk[..., (num_dkv_heads//2):, :].norm()}, dv.norm: {dv[..., :(num_dv_heads//2), :].norm()} {dv[..., (num_dv_heads//2):, :].norm()}")
                     else:
                         dq, dk, dv = dq_fp8, dk_fp8, dv_fp8
                 else:
