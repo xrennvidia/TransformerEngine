@@ -3285,6 +3285,8 @@ class AttnFuncWithCPAndQKVOA2A(torch.autograd.Function):
                     assert isinstance(dout, Float8Tensor), "dout must be Float8Tensors for FP8 MHA!"
                     ctx.dO_quantizer = dout._quantizer
                 else:
+                    if get_distributed_rank(ctx.cp_group) < cp_size:
+                        print(f"CP2 bwd rank: {get_distributed_rank(ctx.cp_group)} dO.norm: {dout.norm()}")
                     dout = ctx.dO_quantizer(dout)
                 fused_attn_dqkv_dtype = TE_DType[dout._data.dtype]
                 dout = dout._data
@@ -3474,6 +3476,8 @@ class AttnFuncWithCPAndQKVOA2A(torch.autograd.Function):
             )
             if not ctx.is_input_fp8:
                 dq, dk, dv = [x.dequantize(dtype=dout_dtype) for x in [dq, dk, dv]]
+                if get_distributed_rank(ctx.cp_group) < cp_size:
+                    print(f"CP2 bwd rank: {get_distributed_rank(ctx.cp_group)} dq.norm: {dq.norm()}, dk.norm: {dk.norm()}, dv.norm: {dv.norm()}")
         nvtx_range_pop("transformer_engine.AttnFuncWithCPAndQKVOA2A.backward")
 
         return (
@@ -4842,6 +4846,9 @@ class FusedAttnFunc(torch.autograd.Function):
                     if ctx.is_output_fp8:
                         d_out_fp8 = d_out
                     else:
+                        if torch.distributed.get_rank() == 0:
+                            num_dout_heads = d_out.shape[-2]
+                            print(f"CP1 bwd dout.norm: {d_out[..., :(num_dout_heads//2), :].norm()} {d_out[..., (num_dout_heads//2):, :].norm()}")
                         d_out_fp8 = ctx.dO_quantizer(d_out)
                     dqkv_dtype = TE_DType[d_out_fp8._data.dtype]
                     # q_fp8, k_fp8, v_fp8, out_fp8:      torch.float8_e4m3fn
@@ -4910,6 +4917,10 @@ class FusedAttnFunc(torch.autograd.Function):
                             dq = dq_fp8.dequantize()
                             dk = dk_fp8.dequantize()
                             dv = dv_fp8.dequantize()
+                            if torch.distributed.get_rank() == 0:
+                                num_dq_heads = dq.shape[-2]
+                                num_dkv_heads = dk.shape[-2]
+                                print(f"CP1 bwd dq.norm: {dq[..., :(num_dq_heads//2), :].norm()} {dq[..., (num_dq_heads//2):, :].norm()}, dk.norm: {dk[..., :(num_dkv_heads//2), :].norm()} {dk[..., (num_dkv_heads//2):, :].norm()}, dv.norm: {dv[..., :(num_dv_heads//2), :].norm()} {dv[..., (num_dv_heads//2):, :].norm()}")
                     else:
                         dq, dk, dv = dq_fp8, dk_fp8, dv_fp8
                 else:
