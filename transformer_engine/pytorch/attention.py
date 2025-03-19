@@ -4589,7 +4589,7 @@ class FusedAttnFunc(torch.autograd.Function):
             dpa_utils.get_attention_quantizers(fp8, quantizers, cp_specific_quantizers=False)
         )
         if torch.distributed.get_rank() == 0:
-            print(f"CP1 fwd QKV_quantizer: {QKV_quantizer.scale} {QKV_quantizer.amax} {QKV_quantizer.dtype}, dQKV_quantizer: {dQKV_quantizer.scale} {dQKV_quantizer.amax} {dQKV_quantizer.dtype}, O_quantizer: {O_quantizer.scale} {O_quantizer.amax} {O_quantizer.dtype}, dO_quantizer: {dO_quantizer.scale} {dO_quantizer.amax} {dO_quantizer.dtype}, S_quantizer: {S_quantizer.scale} {S_quantizer.amax} {S_quantizer.dtype}, dP_quantizer: {dP_quantizer.scale} {dP_quantizer.amax} {dP_quantizer.dtype}, dQKV_quantizer: {dQKV_quantizer.scale} {dQKV_quantizer.amax} {dQKV_quantizer.dtype}")
+            print(f"CP1 fwd QKV_quantizer: {QKV_quantizer.scale} {QKV_quantizer.amax} {QKV_quantizer.dtype}, dQKV_quantizer: {dQKV_quantizer.scale} {dQKV_quantizer.amax} {dQKV_quantizer.dtype}, O_quantizer: {O_quantizer.scale} {O_quantizer.amax} {O_quantizer.dtype}, dO_quantizer: {dO_quantizer.scale} {dO_quantizer.amax} {dO_quantizer.dtype}, S_quantizer: {S_quantizer.scale} {S_quantizer.amax} {S_quantizer.dtype}, dP_quantizer: {dP_quantizer.scale} {dP_quantizer.amax} {dP_quantizer.dtype}")
         if fp8:
             fused_attention_backend = FusedAttnBackend["FP8"]
             assert isinstance(k, q.__class__) and isinstance(
