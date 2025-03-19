@@ -4600,8 +4600,8 @@ class FusedAttnFunc(torch.autograd.Function):
         QKV_quantizer, O_quantizer, S_quantizer, dQKV_quantizer, dO_quantizer, dP_quantizer = (
             dpa_utils.get_attention_quantizers(fp8, quantizers, cp_specific_quantizers=False)
         )
-        if torch.distributed.get_rank() == 0 and (layer_number == 1 or layer_number == 80):
-            print(f"CP1 fwd layer: {layer_number} QKV_quantizer: {QKV_quantizer.scale} {QKV_quantizer.amax} {QKV_quantizer.dtype}, dQKV_quantizer: {dQKV_quantizer.scale} {dQKV_quantizer.amax} {dQKV_quantizer.dtype}, O_quantizer: {O_quantizer.scale} {O_quantizer.amax} {O_quantizer.dtype}, dO_quantizer: {dO_quantizer.scale} {dO_quantizer.amax} {dO_quantizer.dtype}, S_quantizer: {S_quantizer.scale} {S_quantizer.amax} {S_quantizer.dtype}, dP_quantizer: {dP_quantizer.scale} {dP_quantizer.amax} {dP_quantizer.dtype}", flush=True)
+        if torch.distributed.get_rank() < 2 and (layer_number == 1 or layer_number == 80):
+            print(f"CP1 fwd rank: {torch.distributed.get_rank()} layer: {layer_number} QKV_quantizer: {QKV_quantizer.scale} {QKV_quantizer.amax} {QKV_quantizer.dtype}, dQKV_quantizer: {dQKV_quantizer.scale} {dQKV_quantizer.amax} {dQKV_quantizer.dtype}, O_quantizer: {O_quantizer.scale} {O_quantizer.amax} {O_quantizer.dtype}, dO_quantizer: {dO_quantizer.scale} {dO_quantizer.amax} {dO_quantizer.dtype}, S_quantizer: {S_quantizer.scale} {S_quantizer.amax} {S_quantizer.dtype}, dP_quantizer: {dP_quantizer.scale} {dP_quantizer.amax} {dP_quantizer.dtype}", flush=True)
         if fp8:
             fused_attention_backend = FusedAttnBackend["FP8"]
             assert isinstance(k, q.__class__) and isinstance(
@@ -4670,8 +4670,8 @@ class FusedAttnFunc(torch.autograd.Function):
             # is_output_fp8 = False: out_save.dtype = torch.float16 or torch.bfloat16
             # is_output_fp8 = True:  out_save.dtype = torch.float8_e4m3fn
             out_save = out_ret
-            if torch.distributed.get_rank() == 0 and (layer_number == 1 or layer_number == 80):
-                print(f"CP1 fwd layer: {layer_number} out.norm: {out_save.norm()}", flush=True)
+            if torch.distributed.get_rank() < 2 and (layer_number == 1 or layer_number == 80):
+                print(f"CP1 fwd rank: {torch.distributed.get_rank()} layer: {layer_number} out.norm: {out_save.norm()}", flush=True)
 
             if not int(os.getenv("NVTE_FP8_DPA_BWD", "1")):
                 # 1: qkv packed, 2: kv packed, 3: qkv separate
@@ -4856,16 +4856,16 @@ class FusedAttnFunc(torch.autograd.Function):
                     if ctx.is_output_fp8:
                         d_out_fp8 = d_out
                     else:
-                        if torch.distributed.get_rank() == 0 and (ctx.layer_number == 1 or ctx.layer_number == 80):
-                            print(f"CP1 bwd layer: {ctx.layer_number} d_out.norm: {d_out.norm()}", flush=True)
+                        if torch.distributed.get_rank() < 2 and (ctx.layer_number == 1 or ctx.layer_number == 80):
+                            print(f"CP1 bwd rank: {torch.distributed.get_rank()} layer: {ctx.layer_number} d_out.norm: {d_out.norm()}", flush=True)
                         d_out_fp8 = ctx.dO_quantizer(d_out)
                     dqkv_dtype = TE_DType[d_out_fp8._data.dtype]
                     # q_fp8, k_fp8, v_fp8, out_fp8:      torch.float8_e4m3fn
                     # d_out_fp8, dq_fp8, dk_fp8, dv_fp8: torch.float8_e5m2
-                    if torch.distributed.get_rank() == 0 and (ctx.layer_number == 1 or ctx.layer_number == 80):
-                        print(f"CP1 bwd layer: {ctx.layer_number} fp8: {ctx.fp8}, is_input_fp8: {ctx.is_input_fp8}, is_output_fp8: {ctx.is_output_fp8}, fake_dtype: {fake_dtype}, qkv_dtype: {dqkv_dtype}, qkv_layout: {ctx.qkv_layout}, fused_attn_backend: {ctx.fused_attention_backend}", flush=True)
-                        print(f"CP1 bwd layer: {ctx.layer_number} q_fp8: {isinstance(q_fp8, Float8Tensor)}, k_fp8: {isinstance(k_fp8, Float8Tensor)}, v_fp8: {isinstance(v_fp8, Float8Tensor)}, out_fp8: {isinstance(out_fp8, Float8Tensor)}, d_out_fp8: {isinstance(d_out_fp8, Float8Tensor)}", flush=True)
-                        print(f"CP1 bwd layer: {ctx.layer_number} q_fp8.dtype: {q_fp8._fp8_dtype} {q_fp8._data.dtype} {q_fp8._data.shape} {q_fp8._data.stride()}, k_fp8.dtype: {k_fp8._fp8_dtype} {k_fp8._data.dtype} {k_fp8._data.shape} {k_fp8._data.stride()}, v_fp8.dtype: {v_fp8._fp8_dtype} {v_fp8._data.dtype} {v_fp8._data.shape} {v_fp8._data.stride()}, out_fp8.dtype: {out_fp8._fp8_dtype} {out_fp8._data.dtype} {out_fp8._data.shape} {out_fp8._data.stride()}, d_out_fp8.dtype: {d_out_fp8._fp8_dtype} {d_out_fp8._data.dtype} {d_out_fp8._data.shape} {d_out_fp8._data.stride()}", flush=True)
+                    if torch.distributed.get_rank() < 2 and (ctx.layer_number == 1 or ctx.layer_number == 80):
+                        print(f"CP1 bwd rank: {torch.distributed.get_rank()} layer: {ctx.layer_number} fp8: {ctx.fp8}, is_input_fp8: {ctx.is_input_fp8}, is_output_fp8: {ctx.is_output_fp8}, fake_dtype: {fake_dtype}, qkv_dtype: {dqkv_dtype}, qkv_layout: {ctx.qkv_layout}, fused_attn_backend: {ctx.fused_attention_backend}", flush=True)
+                        print(f"CP1 bwd rank: {torch.distributed.get_rank()} layer: {ctx.layer_number} q_fp8: {isinstance(q_fp8, Float8Tensor)}, k_fp8: {isinstance(k_fp8, Float8Tensor)}, v_fp8: {isinstance(v_fp8, Float8Tensor)}, out_fp8: {isinstance(out_fp8, Float8Tensor)}, d_out_fp8: {isinstance(d_out_fp8, Float8Tensor)}", flush=True)
+                        print(f"CP1 bwd rank: {torch.distributed.get_rank()} layer: {ctx.layer_number} q_fp8.dtype: {q_fp8._fp8_dtype} {q_fp8._data.dtype} {q_fp8._data.shape} {q_fp8._data.stride()}, k_fp8.dtype: {k_fp8._fp8_dtype} {k_fp8._data.dtype} {k_fp8._data.shape} {k_fp8._data.stride()}, v_fp8.dtype: {v_fp8._fp8_dtype} {v_fp8._data.dtype} {v_fp8._data.shape} {v_fp8._data.stride()}, out_fp8.dtype: {out_fp8._fp8_dtype} {out_fp8._data.dtype} {out_fp8._data.shape} {out_fp8._data.stride()}, d_out_fp8.dtype: {d_out_fp8._fp8_dtype} {d_out_fp8._data.dtype} {d_out_fp8._data.shape} {d_out_fp8._data.stride()}", flush=True)
                     dq_fp8, dk_fp8, dv_fp8, *rest = fused_attn_bwd(
                         ctx.max_seqlen_q,
                         ctx.max_seqlen_kv,
@@ -4894,10 +4894,10 @@ class FusedAttnFunc(torch.autograd.Function):
                         ctx.window_size,
                         ctx.deterministic,
                     )
-                    if torch.distributed.get_rank() == 0 and (ctx.layer_number == 1 or ctx.layer_number == 80):
-                        print(f"CP1 bwd layer: {ctx.layer_number} QKV_quantizer: {q_fp8._quantizer.scale} {q_fp8._quantizer.amax} {q_fp8._quantizer.dtype}, dQKV_quantizer: {ctx.dQKV_quantizer.scale} {ctx.dQKV_quantizer.amax} {ctx.dQKV_quantizer.dtype}, O_quantizer: {out_fp8._quantizer.scale} {out_fp8._quantizer.amax} {out_fp8._quantizer.dtype}, dO_quantizer: {ctx.dO_quantizer.scale} {ctx.dO_quantizer.amax} {ctx.dO_quantizer.dtype}, S_quantizer: {ctx.S_quantizer.scale} {ctx.S_quantizer.amax} {ctx.S_quantizer.dtype}, dP_quantizer: {ctx.dP_quantizer.scale} {ctx.dP_quantizer.amax} {ctx.dP_quantizer.dtype}", flush=True)
-                        print(f"CP1 bwd layer: {ctx.layer_number} dq_fp8: {isinstance(dq_fp8, Float8Tensor)}, dk_fp8: {isinstance(dk_fp8, Float8Tensor)}, dv_fp8: {isinstance(dv_fp8, Float8Tensor)}", flush=True)
-                        print(f"CP1 bwd layer: {ctx.layer_number} dq_fp8.dtype: {dq_fp8.dtype} {dq_fp8._fp8_dtype} {dq_fp8._data.dtype} {dq_fp8._data.shape} {dq_fp8._data.stride()}, dk_fp8.dtype: {dk_fp8.dtype} {dk_fp8._fp8_dtype} {dk_fp8._data.dtype} {dk_fp8._data.shape} {dk_fp8._data.stride()}, dv_fp8.dtype: {dv_fp8.dtype} {dv_fp8._fp8_dtype} {dv_fp8._data.dtype} {dv_fp8._data.shape} {dv_fp8._data.stride()}", flush=True)
+                    if torch.distributed.get_rank() < 2 and (ctx.layer_number == 1 or ctx.layer_number == 80):
+                        print(f"CP1 bwd rank: {torch.distributed.get_rank()} layer: {ctx.layer_number} QKV_quantizer: {q_fp8._quantizer.scale} {q_fp8._quantizer.amax} {q_fp8._quantizer.dtype}, dQKV_quantizer: {ctx.dQKV_quantizer.scale} {ctx.dQKV_quantizer.amax} {ctx.dQKV_quantizer.dtype}, O_quantizer: {out_fp8._quantizer.scale} {out_fp8._quantizer.amax} {out_fp8._quantizer.dtype}, dO_quantizer: {ctx.dO_quantizer.scale} {ctx.dO_quantizer.amax} {ctx.dO_quantizer.dtype}, S_quantizer: {ctx.S_quantizer.scale} {ctx.S_quantizer.amax} {ctx.S_quantizer.dtype}, dP_quantizer: {ctx.dP_quantizer.scale} {ctx.dP_quantizer.amax} {ctx.dP_quantizer.dtype}", flush=True)
+                        print(f"CP1 bwd rank: {torch.distributed.get_rank()} layer: {ctx.layer_number} dq_fp8: {isinstance(dq_fp8, Float8Tensor)}, dk_fp8: {isinstance(dk_fp8, Float8Tensor)}, dv_fp8: {isinstance(dv_fp8, Float8Tensor)}", flush=True)
+                        print(f"CP1 bwd rank: {torch.distributed.get_rank()} layer: {ctx.layer_number} dq_fp8.dtype: {dq_fp8.dtype} {dq_fp8._fp8_dtype} {dq_fp8._data.dtype} {dq_fp8._data.shape} {dq_fp8._data.stride()}, dk_fp8.dtype: {dk_fp8.dtype} {dk_fp8._fp8_dtype} {dk_fp8._data.dtype} {dk_fp8._data.shape} {dk_fp8._data.stride()}, dv_fp8.dtype: {dv_fp8.dtype} {dv_fp8._fp8_dtype} {dv_fp8._data.dtype} {dv_fp8._data.shape} {dv_fp8._data.stride()}", flush=True)
 
                     # is_input_fp8 = False: dq, dk, dv: torch.float16 or torch.bfloat16
                     # is_input_fp8 = True:  dq, dk, dv: torch.float8_e5m2
@@ -4926,8 +4926,8 @@ class FusedAttnFunc(torch.autograd.Function):
                             dq = dq_fp8.dequantize()
                             dk = dk_fp8.dequantize()
                             dv = dv_fp8.dequantize()
-                            if torch.distributed.get_rank() == 0 and (ctx.layer_number == 1 or ctx.layer_number == 80):
-                                print(f"CP1 bwd layer: {ctx.layer_number} dq.norm: {dq.norm()}, dk.norm: {dk.norm()}, dv.norm: {dv.norm()}", flush=True)
+                            if torch.distributed.get_rank() < 2 and (ctx.layer_number == 1 or ctx.layer_number == 80):
+                                print(f"CP1 bwd rank: {torch.distributed.get_rank()} layer: {ctx.layer_number} dq.norm: {dq.norm()}, dk.norm: {dk.norm()}, dv.norm: {dv.norm()}", flush=True)
                     else:
                         dq, dk, dv = dq_fp8, dk_fp8, dv_fp8
                 else:
