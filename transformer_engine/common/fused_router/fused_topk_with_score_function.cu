@@ -193,6 +193,7 @@ __global__ void fused_topk_with_score_function_forward_kernel(
       // Top2
       for (int i = 0; i < num_groups; i++) {
         topk_and_mask<TopkFunc>(
+        topk_and_mask<TopkFunc>(
             /*scores ptr = */ scores + i * group_size,
             /*data size = */ group_size,
             /*topk = */ topk / group_topk,
@@ -213,6 +214,7 @@ __global__ void fused_topk_with_score_function_forward_kernel(
 
       // select the topk groups
       topk_and_mask<TopkFunc>(
+      topk_and_mask<TopkFunc>(
           /*scores ptr = */ group_scores,
           /*data size = */ num_groups,
           /*topk = */ group_topk,
@@ -230,8 +232,10 @@ __global__ void fused_topk_with_score_function_forward_kernel(
       }
       __syncwarp();
       topk_and_mask<TopkFunc>(masked_scores, num_experts, topk, topk_indices, topk_scores, lane_id);
+      topk_and_mask<TopkFunc>(masked_scores, num_experts, topk, topk_indices, topk_scores, lane_id);
 
     } else {
+      topk_and_mask<TopkFunc>(scores, num_experts, topk, topk_indices, topk_scores, lane_id);
       topk_and_mask<TopkFunc>(scores, num_experts, topk, topk_indices, topk_scores, lane_id);
     }
     __syncwarp();
