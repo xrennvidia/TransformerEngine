@@ -9,25 +9,10 @@
 
 #include "../util/logging.h"
 #include "../utils.cuh"
-#include "../util/logging.h"
-#include "../utils.cuh"
 #include "transformer_engine/transformer_engine.h"
 
 namespace transformer_engine {
 namespace fused_router {
-
-// Check if requested shared memory size exceeds device capacity.
-// Throws an error with num_experts info to help users diagnose the issue.
-inline void check_shared_memory_capacity_num_experts(size_t shared_memory_size, int num_experts) {
-  int device_id;
-  NVTE_CHECK_CUDA(cudaGetDevice(&device_id));
-  int max_smem_per_block;
-  NVTE_CHECK_CUDA(cudaDeviceGetAttribute(&max_smem_per_block,
-                                         cudaDevAttrMaxSharedMemoryPerBlockOptin, device_id));
-  NVTE_CHECK(shared_memory_size <= static_cast<size_t>(max_smem_per_block), "Shared memory size (",
-             shared_memory_size, " bytes) exceeds device capacity (", max_smem_per_block,
-             " bytes). Try reducing num_experts (currently ", num_experts, ").");
-}
 
 // Check if requested shared memory size exceeds device capacity.
 // Throws an error with num_experts info to help users diagnose the issue.
@@ -81,7 +66,6 @@ __device__ inline T warp_reduce_on_shmem(T *data_ptr, int data_size, ReduceFuncT
     default_val = -std::numeric_limits<CompType>::infinity();
   }
 
-  // Some value is handled in local thread
   // Some value is handled in local thread
   // Thread 0 is responsible for the: 0-th, 32-th, 64-th, 96-th ...
   // Reduce the value in local thread
@@ -429,16 +413,6 @@ __device__ inline void naive_topk_and_mask(CompType *scores, int data_size, int 
     }
     __syncwarp();
   }
-}
-
-template <TopkFuncType TopkFunc>
-__device__ __forceinline__ void topk_and_mask(CompType *scores, int data_size, int topk,
-                                              int *topk_indices, CompType *topk_scores,
-                                              int lane_id) {
-  if constexpr (TopkFunc == TopkFuncType::Radix)
-    return radix_topk_and_mask(scores, data_size, topk, topk_indices, topk_scores, lane_id);
-  else
-    return naive_topk_and_mask(scores, data_size, topk, topk_indices, topk_scores, lane_id);
 }
 
 template <TopkFuncType TopkFunc>
