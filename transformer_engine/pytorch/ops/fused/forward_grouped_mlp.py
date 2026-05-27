@@ -534,9 +534,7 @@ class _ForwardGroupedMLP_CuTeGEMMBase_MXFP8(FusedOperation):
                 activation_op, "activation_offloading"
             )
             offload_fc1_input = bool(getattr(fc1_op, "activation_offloading", False))
-            offload_activation_input = bool(
-                getattr(activation_op, "activation_offloading", False)
-            )
+            offload_activation_input = bool(getattr(activation_op, "activation_offloading", False))
             activation_is_srelu = isinstance(activation_op, ScaledSReLU)
             activation_recompute_in_mlp = bool(
                 getattr(activation_op, "activation_recompute_in_mlp", False)
