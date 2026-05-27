@@ -556,17 +556,10 @@ class _ForwardGroupedMLP_CuTeGEMMBase_MXFP8(FusedOperation):
             fc1_weight_tensors = (
                 [grouped_fc1_weight] if fc1_op.single_grouped_weight else grouped_fc1_weight
             )
-            fc2_weight_tensors = (
-                [grouped_fc2_weight] if fc2_op.single_grouped_weight else grouped_fc2_weight
-            )
             if fine_grained_activation_offloading:
                 if not offload_fc1_input:
                     mark_not_offload(grouped_fc1_x)
-                if not offload_activation_input:
-                    mark_not_offload(activation_in, scales)
-                if saved_grouped_fc2_x is not None:
-                    mark_not_offload(saved_grouped_fc2_x)
-                mark_not_offload(*fc1_weight_tensors, *fc2_weight_tensors)
+                mark_not_offload(*fc1_weight_tensors)
             fc1_ctx.save_for_backward(
                 split_sizes,
                 base_split_offsets,
@@ -585,6 +578,8 @@ class _ForwardGroupedMLP_CuTeGEMMBase_MXFP8(FusedOperation):
             fc1_ctx.weight_requires_grad = weight_requires_grad
 
             # Activation
+            if fine_grained_activation_offloading and not offload_activation_input:
+                mark_not_offload(activation_in, scales)
             activation_ctx.save_for_backward(activation_in, scales)
             activation_ctx.extra_input_requires_grad = True
             activation_ctx.input_requires_grad = True
@@ -597,6 +592,13 @@ class _ForwardGroupedMLP_CuTeGEMMBase_MXFP8(FusedOperation):
             #   [split_sizes, base_split_offsets, split_points,
             #    (fc2_scales if _scale_bias),
             #    grouped_fc2_x, *fc2_weight_tensors]
+            fc2_weight_tensors = (
+                [grouped_fc2_weight] if fc2_op.single_grouped_weight else grouped_fc2_weight
+            )
+            if fine_grained_activation_offloading:
+                if saved_grouped_fc2_x is not None:
+                    mark_not_offload(saved_grouped_fc2_x)
+                mark_not_offload(*fc2_weight_tensors)
             fc2_saved: list[Optional[torch.Tensor | GroupedTensorStorage]] = [
                 split_sizes,
                 base_split_offsets,
