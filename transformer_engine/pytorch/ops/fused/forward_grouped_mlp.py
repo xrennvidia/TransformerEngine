@@ -13,7 +13,7 @@ from typing import Any, Optional
 import torch
 
 import transformer_engine_torch as tex
-from ...cpu_offload import mark_not_offload
+from ...cpu_offload import is_cpu_offload_enabled, mark_not_offload
 from ...quantization import Recipe
 from ...tensor import Quantizer
 from ...utils import get_cached_ones_tensor, get_device_compute_capability, mark_grouped_tensor
@@ -524,9 +524,7 @@ class _ForwardGroupedMLP_CuTeGEMMBase_MXFP8(FusedOperation):
         if requires_grad:
             mark_grouped_tensor(grouped_fc1_x, activation_in, scales, grouped_fc2_x)
             activation_op = self.basic_ops[1]
-            fine_grained_activation_offloading = hasattr(
-                fc1_op, "fine_grained_activation_offloading"
-            ) or hasattr(activation_op, "fine_grained_activation_offloading")
+            cpu_offloading = is_cpu_offload_enabled()
             offload_fc1_input = bool(getattr(fc1_op, "fine_grained_activation_offloading", False))
             offload_activation_input = bool(
                 getattr(activation_op, "fine_grained_activation_offloading", False)
@@ -556,7 +554,7 @@ class _ForwardGroupedMLP_CuTeGEMMBase_MXFP8(FusedOperation):
             fc1_weight_tensors = (
                 [grouped_fc1_weight] if fc1_op.single_grouped_weight else grouped_fc1_weight
             )
-            if fine_grained_activation_offloading:
+            if cpu_offloading:
                 if not offload_fc1_input:
                     mark_not_offload(grouped_fc1_x)
                 mark_not_offload(*fc1_weight_tensors)
@@ -578,7 +576,7 @@ class _ForwardGroupedMLP_CuTeGEMMBase_MXFP8(FusedOperation):
             fc1_ctx.weight_requires_grad = weight_requires_grad
 
             # Activation
-            if fine_grained_activation_offloading and not offload_activation_input:
+            if cpu_offloading and not offload_activation_input:
                 mark_not_offload(activation_in, scales)
             activation_ctx.save_for_backward(activation_in, scales)
             activation_ctx.extra_input_requires_grad = True
@@ -595,7 +593,7 @@ class _ForwardGroupedMLP_CuTeGEMMBase_MXFP8(FusedOperation):
             fc2_weight_tensors = (
                 [grouped_fc2_weight] if fc2_op.single_grouped_weight else grouped_fc2_weight
             )
-            if fine_grained_activation_offloading:
+            if cpu_offloading:
                 if saved_grouped_fc2_x is not None:
                     mark_not_offload(saved_grouped_fc2_x)
                 mark_not_offload(*fc2_weight_tensors)
