@@ -290,6 +290,7 @@ class _ForwardGroupedMLP_CuTeGEMMBase_MXFP8(FusedOperation):
         # Group-quantize input tensor and convert dtypes if needed
         fc1_input_quantizer.set_usage(rowwise=True, columnwise=weight_requires_grad)
         fc1_input_quantizer.optimize_for_gemm = True
+        fc1_input_quantizer.internal = True
         if isinstance(input_, GroupedTensor) and isinstance(
             getattr(input_, "quantizer", None), MXFP8Quantizer
         ):
@@ -317,14 +318,9 @@ class _ForwardGroupedMLP_CuTeGEMMBase_MXFP8(FusedOperation):
             )
         else:
             fc1_x = maybe_dequantize(input_, dtype)
-            quantizer_internal = fc1_input_quantizer.internal
-            fc1_input_quantizer.internal = True
-            try:
-                grouped_fc1_x = tex.group_quantize(
-                    fc1_x, fc1_input_quantizer, num_groups, split_sizes
-                )
-            finally:
-                fc1_input_quantizer.internal = quantizer_internal
+            grouped_fc1_x = tex.group_quantize(
+                fc1_x, fc1_input_quantizer, num_groups, split_sizes
+            )
 
         # Pack data tensors
         # Note: Fused kernel expects tensor with non-contiguous
