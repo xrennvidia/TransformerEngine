@@ -527,9 +527,7 @@ class _ForwardGroupedMLP_CuTeGEMMBase_MXFP8(FusedOperation):
             fine_grained_activation_offloading = hasattr(
                 fc1_op, "fine_grained_activation_offloading"
             ) or hasattr(activation_op, "fine_grained_activation_offloading")
-            offload_fc1_input = bool(
-                getattr(fc1_op, "fine_grained_activation_offloading", False)
-            )
+            offload_fc1_input = bool(getattr(fc1_op, "fine_grained_activation_offloading", False))
             offload_activation_input = bool(
                 getattr(activation_op, "fine_grained_activation_offloading", False)
             )
