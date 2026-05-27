@@ -524,11 +524,15 @@ class _ForwardGroupedMLP_CuTeGEMMBase_MXFP8(FusedOperation):
         if requires_grad:
             mark_grouped_tensor(grouped_fc1_x, activation_in, scales, grouped_fc2_x)
             activation_op = self.basic_ops[1]
-            selective_offload = hasattr(fc1_op, "activation_offloading") or hasattr(
-                activation_op, "activation_offloading"
+            fine_grained_activation_offloading = hasattr(
+                fc1_op, "fine_grained_activation_offloading"
+            ) or hasattr(activation_op, "fine_grained_activation_offloading")
+            offload_fc1_input = bool(
+                getattr(fc1_op, "fine_grained_activation_offloading", False)
             )
-            offload_fc1_input = bool(getattr(fc1_op, "activation_offloading", False))
-            offload_activation_input = bool(getattr(activation_op, "activation_offloading", False))
+            offload_activation_input = bool(
+                getattr(activation_op, "fine_grained_activation_offloading", False)
+            )
             activation_is_srelu = isinstance(activation_op, ScaledSReLU)
             activation_recompute_in_mlp = bool(
                 getattr(activation_op, "activation_recompute_in_mlp", False)
@@ -557,7 +561,7 @@ class _ForwardGroupedMLP_CuTeGEMMBase_MXFP8(FusedOperation):
             fc2_weight_tensors = (
                 [grouped_fc2_weight] if fc2_op.single_grouped_weight else grouped_fc2_weight
             )
-            if selective_offload:
+            if fine_grained_activation_offloading:
                 if not offload_fc1_input:
                     mark_not_offload(grouped_fc1_x)
                 if not offload_activation_input:
