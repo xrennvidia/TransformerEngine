@@ -57,6 +57,9 @@ def _cudnn_compute_wgrad(
     where a = DY^T = (out_features, total_tokens) row-major and
           b = X  = (total_tokens, in_features) column-major.
     """
+    if current_stream is None:
+        current_stream = torch.cuda.current_stream().cuda_stream
+
     out_features, in_features = weight_shape
     total_tokens = grouped_dy.logical_shape[0]
 
@@ -217,7 +220,6 @@ def _compute_grad_params(
                 accumulate=accumulate_into_main_grad,
                 wgrad_kernel_fn=cudnn_wgrad_kernel_fn,
                 single_grouped_weight=fc_op.single_grouped_weight,
-                current_stream=torch.cuda.current_stream().cuda_stream,
             )
         else:
             gemm_fn = functools.partial(
